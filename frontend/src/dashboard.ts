@@ -1,12 +1,14 @@
 import { api, saveHost, removeHost, refreshHostLocation, type CloudHost, type HostInput } from './cloud-api';
 import type { HostGlobe } from './globe';
 import type { FilePage } from './file-page';
+import type { Snippets } from './snippets';
 import { countryFlag } from './flags';
 import { systemIcon } from './os-icons';
 import './dashboard.css';
 
 interface DashboardActions {
   files: FilePage;
+  snippets: Snippets;
   refresh(): Promise<CloudHost[]>;
   connect(host: CloudHost): Promise<void>;
   quickConnect(): void;
@@ -17,6 +19,7 @@ const icons = {
   home: '<path d="m3 10 9-7 9 7v10H3Z"/><path d="M9 20v-7h6v7"/>',
   server: '<rect x="4" y="3" width="16" height="7" rx="2"/><rect x="4" y="14" width="16" height="7" rx="2"/><path d="M8 6.5h.01M8 17.5h.01M15 6.5h2M15 17.5h2"/>',
   terminal: '<path d="m5 6 6 6-6 6m8 0h6"/>',
+  snippets: '<path d="M9 3H7a2 2 0 0 0-2 2v4l-2 3 2 3v4a2 2 0 0 0 2 2h2m6-18h2a2 2 0 0 1 2 2v4l2 3-2 3v4a2 2 0 0 1-2 2h-2"/>',
   folder: '<path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M3 9h18"/>',
   shield: '<path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6Z"/><path d="m8 12 3 3 5-6"/>',
   search: '<circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/>',
@@ -52,6 +55,7 @@ export class Dashboard {
           <button class="rail-item selected" id="rail-overview" aria-current="page">${icon('home')}<span>总览</span></button>
           <button class="rail-item" id="rail-hosts">${icon('server')}<span>主机</span></button>
           <button class="rail-item" id="rail-files">${icon('folder')}<span>文件管理</span></button>
+          <button class="rail-item" id="rail-snippets">${icon('snippets')}<span>代码片段</span></button>
           <button class="rail-item" id="quick-connect">${icon('terminal')}<span>快速连接</span></button>
           <span class="rail-security" title="管理员身份认证">${icon('shield')}<span id="auth-provider-label">身份<br>保护</span></span>
         </nav>
@@ -105,6 +109,7 @@ export class Dashboard {
       </dialog>`;
     document.body.prepend(this.root);
     this.get('.home-layout').append(this.actions.files.root);
+    this.get('.home-layout').append(this.actions.snippets.page);
     this.dialog = this.get<HTMLDialogElement>('.host-dialog');
     this.form = this.get<HTMLFormElement>('#cloud-host-form');
     this.get('#account-action').addEventListener('click', async (event) => {
@@ -129,6 +134,7 @@ export class Dashboard {
       if (id === '#rail-hosts') this.get<HTMLInputElement>('#host-search').focus();
     });
     this.get('#rail-files').addEventListener('click', () => this.showFiles());
+    this.get('#rail-snippets').addEventListener('click', () => this.showSnippets());
     for (const id of ['#quick-connect', '#bottom-quick']) this.get(id).addEventListener('click', () => {
       if (this.busy || !this.actions.files.confirmLeave()) return;
       this.actions.leaveWorkspace();
@@ -208,6 +214,7 @@ export class Dashboard {
 
   show(): void {
     this.actions.files.hide();
+    this.actions.snippets.hide();
     this.isHome = true; this.root.hidden = false;
     this.get('.home-content').hidden = false;
     this.selectNavigation('rail-overview');
@@ -218,14 +225,17 @@ export class Dashboard {
 
   openWorkspace(): void {
     this.actions.files.hide();
+    this.actions.snippets.hide();
     this.isHome = false; this.root.hidden = true;
     document.getElementById('app')!.hidden = false;
     document.body.dataset.view = 'workspace';
     this.globe?.setActive(false);
     window.dispatchEvent(new Event('resize'));
+    this.actions.snippets.load();
   }
 
   showFiles(): void {
+    this.actions.snippets.hide();
     this.isHome = false; this.root.hidden = false;
     this.get('.home-content').hidden = true;
     document.getElementById('app')!.hidden = true;
@@ -233,6 +243,19 @@ export class Dashboard {
     this.selectNavigation('rail-files');
     this.globe?.setActive(false);
     this.actions.files.show();
+  }
+
+  showSnippets(): void {
+    if (!this.actions.files.confirmLeave()) return;
+    // 仅切换视图，不结束 SSH；在片段页编辑后可回到同一会话。
+    this.actions.files.hide();
+    this.isHome = false; this.root.hidden = false;
+    this.get('.home-content').hidden = true;
+    document.getElementById('app')!.hidden = true;
+    document.body.dataset.view = 'snippets';
+    this.selectNavigation('rail-snippets');
+    this.globe?.setActive(false);
+    this.actions.snippets.show();
   }
 
   private selectNavigation(id: string): void {
@@ -249,13 +272,14 @@ export class Dashboard {
 
   private signedOut(): void {
     this.actions.leaveWorkspace();
+    this.actions.snippets.clear();
     this.authenticated = false;
     this.get('#account-label').textContent = '未登录';
     const action = this.get<HTMLAnchorElement>('#account-action');
     action.href = '/auth/login'; action.textContent = '登录'; action.title = '管理员登录';
     this.setHosts([]);
     this.get('#host-list').textContent = '请点击右上角「登录」验证管理员身份。';
-    this.root.querySelectorAll<HTMLButtonElement>('[data-add], #quick-connect, #bottom-quick').forEach((button) => { button.disabled = true; });
+    this.root.querySelectorAll<HTMLButtonElement>('[data-add], #quick-connect, #bottom-quick, #rail-snippets').forEach((button) => { button.disabled = true; });
     this.show();
   }
 

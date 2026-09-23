@@ -5,6 +5,7 @@ import { historyKey, historyLabel } from './history';
 import { listHosts, hostCredentials, saveHost, removeHost, updateHostSystem, type CloudHost, type Credentials, type HostSystemInfo } from './cloud-api';
 import { Dashboard } from './dashboard';
 import { FilePage } from './file-page';
+import { Snippets } from './snippets';
 import { resolveConnectionControl, resolveConnectionPanel } from './ui-state';
 import { classifyHostKey, SSH_FINGERPRINT_RE, type HostKeyPrompt } from './host-key';
 import { FileManager, collectFileManagerElements } from './file-manager';
@@ -2135,6 +2136,17 @@ async function initialize(): Promise<void> {
   }, fileManager);
   dashboard = new Dashboard({
     files: filePage,
+    snippets: new Snippets(ui.terminalCard, (snippet) => {
+      // 片段只进入草稿，尤其多行命令不能通过粘贴意外立即执行。
+      const input = document.getElementById('command-editor-input') as HTMLTextAreaElement;
+      if (input.value.trim() && input.value !== snippet.command
+        && !confirm(bilingual('替换命令编辑器中的现有内容？', 'Replace the current command draft?'))) return;
+      input.value = snippet.command;
+      input.dispatchEvent(new Event('input'));
+      if (document.getElementById('command-editor')!.hidden) document.getElementById('command-editor-toggle')!.click();
+      input.focus();
+      toast(bilingual('已填入命令编辑器，确认后再发送。', 'Added to the command editor. Review before sending.'), 'info');
+    }, () => dashboard?.openWorkspace(), () => dashboard?.showSnippets()),
     refresh: async () => {
       profiles = await loadProfiles();
       renderProfiles();

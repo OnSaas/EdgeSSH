@@ -34,6 +34,7 @@ export async function fileFixture(page: Page, options: { firstSeen?: boolean; cr
         : { json: { password: 'test-only-password' } });
     }
     if (path === '/api/hosts') return route.fulfill({ json: { hosts } });
+    if (path === '/api/snippets') return route.fulfill({ json: { snippets: [] } });
     return route.fulfill({ json: { host: hosts.find((item) => path.includes(item.id)) ?? hosts[0] } });
   });
   await page.routeWebSocket('**/api/ssh?*', (ws) => {
