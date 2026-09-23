@@ -104,7 +104,7 @@ export async function fileFixture(page: Page, options: { firstSeen?: boolean; cr
   });
   await page.goto('/');
   await page.locator('#rail-files').click();
-  return { hosts, calls, sshSockets, sftpSockets, uploaded };
+  return { hosts, calls, sshSockets, sftpSockets, uploaded, directories };
 }
 
 export async function connectFiles(page: Page, id = 'alpha') {

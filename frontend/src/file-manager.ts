@@ -1,3 +1,5 @@
+import type { FileListView } from './file-list-view';
+
 export const MAX_SFTP_FILE_SIZE = 64 * 1024 * 1024;
 export const SFTP_UPLOAD_CHUNK_SIZE = 64 * 1024;
 
@@ -209,6 +211,7 @@ export class FileManager {
   private historyIndex = 0;
   private entries: SFTPEntry[] = [];
   private selectedIndex = -1;
+  private listView: FileListView | null = null;
   private pending = new Map<string, PendingRequest>();
   private activeListRequest: string | null = null;
   private uploadState: UploadState | null = null;
@@ -387,6 +390,21 @@ export class FileManager {
     this.updateStatusText(this.statusCopy);
     this.renderEntries();
     this.updateProgressLanguage();
+  }
+
+  setListView(view: FileListView | null): void {
+    this.listView = view;
+    this.renderEntries();
+  }
+
+  selectEntry(index: number): void {
+    this.selectedIndex = this.entries[index] ? index : -1;
+    this.updateControls();
+  }
+
+  activateIndex(index: number): void {
+    this.selectEntry(index);
+    this.activateEntry(this.selectedEntry());
   }
 
   /**
@@ -743,6 +761,22 @@ export class FileManager {
 
   private renderEntries(): void {
     this.elements.tableBody.replaceChildren();
+    if (this.listView) {
+      this.listView.render({
+        chinese: this.isChinese(),
+        selectedId: this.selectedEntry()?.name,
+        items: this.entries.map((entry, index) => ({
+          id: entry.name, name: entry.name, index, entry,
+          columns: [
+            entry.type === 'directory' ? '' : this.formatSize(entry.size),
+            this.localize(this.typeLabel(entry.type)), this.formatDate(entry.mtime),
+            String(entry.permissions), entry.owner ?? String(entry.uid ?? ''),
+            entry.group ?? String(entry.gid ?? ''),
+          ],
+        })),
+      });
+      return;
+    }
     const fragment = document.createDocumentFragment();
     this.entries.forEach((entry, index) => {
       const row = document.createElement('tr');
@@ -1193,7 +1227,7 @@ export class FileManager {
   private renderDisconnected(channelLost = false, detail?: LocalizedText): void {
     this.entries = [];
     this.selectedIndex = -1;
-    this.elements.tableBody.replaceChildren();
+    this.renderEntries();
     this.elements.loading.hidden = true;
     this.elements.empty.hidden = true;
     this.elements.error.hidden = true;

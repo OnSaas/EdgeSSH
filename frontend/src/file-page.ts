@@ -1,4 +1,6 @@
 import type { CloudHost } from './cloud-api';
+import type { FileManager } from './file-manager';
+import type { ArboristFileList } from './file-list';
 import './file-page.css';
 
 export type FileConnectionState = 'idle' | 'connecting' | 'connected' | 'disconnecting' | 'error';
@@ -21,9 +23,10 @@ export class FilePage {
   private state: FileConnectionState = 'idle';
   private preparing = false;
   private mounted = false;
+  private list: ArboristFileList | null = null;
   private activeTarget: { id?: string; label: string } | null = null;
 
-  constructor(private readonly panel: HTMLElement, private readonly actions: FilePageActions) {
+  constructor(private readonly panel: HTMLElement, private readonly actions: FilePageActions, private readonly manager: FileManager) {
     panel.before(this.dockMarker);
     this.root.className = 'files-page';
     this.root.hidden = true;
@@ -68,11 +71,39 @@ export class FilePage {
     this.panel.setAttribute('role', 'region');
     this.panel.setAttribute('aria-labelledby', 'files-heading');
     this.get('#files-heading').focus();
+    void this.mountList();
+  }
+
+  private async mountList(): Promise<void> {
+    try {
+      // 按需加载 React 和 Arborist，不增加总览及原终端首次打开的脚本负担。
+      const { ArboristFileList } = await import('./file-list');
+      if (!this.mounted || this.list) return;
+      const host = document.createElement('div');
+      host.className = 'files-list';
+      this.panel.querySelector('.file-table-wrap')!.prepend(host);
+      this.list = new ArboristFileList(host, {
+        select: (index) => this.manager.selectEntry(index),
+        activate: (index) => this.manager.activateIndex(index),
+      });
+      this.panel.querySelector<HTMLTableElement>('.file-table')!.hidden = true;
+      this.manager.setListView(this.list);
+    } catch {
+      this.manager.setListView(null);
+      this.list?.destroy();
+      this.list = null;
+      this.panel.querySelector<HTMLTableElement>('.file-table')!.hidden = false;
+      if (this.mounted) this.setMessage('文件列表组件加载失败，请刷新页面重试。当前仍可使用原文件表格。', true);
+    }
   }
 
   hide(): void {
     if (!this.mounted) return;
     this.mounted = false;
+    this.list?.destroy();
+    this.list = null;
+    this.panel.querySelector<HTMLTableElement>('.file-table')!.hidden = false;
+    this.manager.setListView(null);
     this.root.hidden = true;
     this.dockMarker.after(this.panel);
     this.panel.setAttribute('role', 'tabpanel');

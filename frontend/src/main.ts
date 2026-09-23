@@ -2132,7 +2132,7 @@ async function initialize(): Promise<void> {
       dashboard?.openWorkspace();
       if (connectionState === 'idle' || connectionState === 'error') setPanelOpen(true);
     },
-  });
+  }, fileManager);
   dashboard = new Dashboard({
     files: filePage,
     refresh: async () => {
