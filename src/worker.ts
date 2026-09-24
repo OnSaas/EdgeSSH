@@ -8,6 +8,7 @@ import { hostsRoute } from './accounts/hosts';
 import { snippetsRoute } from './accounts/snippets';
 import { apiFailure, json } from './accounts/http';
 import { locateHost } from './accounts/location';
+import { forwardingRoute } from './forwarding/routes';
 
 export { SSHSessionDO };
 
@@ -155,6 +156,7 @@ export default {
       if (url.pathname === '/api/auth/me' && request.method === 'GET') return json({ account, provider: authProvider(env) });
       if (url.pathname.startsWith('/api/hosts')) return await hostsRoute(request, env, account!.id, url.pathname);
       if (url.pathname.startsWith('/api/snippets')) return await snippetsRoute(request, env, account!.id, url.pathname);
+      if (url.pathname === '/api/forwarding') return await forwardingRoute(request, env, account!.id);
       if (url.pathname === '/api/session') {
         if (request.method !== 'POST') return corsResponse(jsonError('Method not allowed', 405));
         return corsResponse(await sessionTicket(request, env, account!.id));

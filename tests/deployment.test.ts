@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { parse, stringify } from 'smol-toml';
 import { ensureDatabase } from '../scripts/cloudflare-d1.ts';
-import { createDeploymentConfig, readDeploymentSettings } from '../scripts/deployment-config.ts';
+import { createDeploymentConfig, createPreviewDeploymentConfig, readDeploymentSettings } from '../scripts/deployment-config.ts';
 
 const templateText = await readFile(new URL('../wrangler.toml', import.meta.url), 'utf8');
 const template = parse(templateText);
@@ -48,6 +48,18 @@ test('generated config preserves application bindings and paths without persisti
   }
   assert.deepEqual(parse(serialized), config);
   assert.deepEqual(template, before);
+});
+
+test('main and preview configs use the same preview origin and isolate preview bindings', () => {
+  const origin = 'https://edgessh-preview.example.com';
+  const main = createDeploymentConfig(template, settings, database, { hostname: 'edgessh.example.com', previewOrigin: origin });
+  const preview = createPreviewDeploymentConfig(template, settings, origin);
+  assert.equal((main.vars as Record<string, string>).PREVIEW_ORIGIN, origin);
+  assert.equal((preview.vars as Record<string, string>).PREVIEW_ORIGIN, origin);
+  assert.equal(preview.d1_databases, undefined);
+  assert.equal(preview.assets, undefined);
+  assert.equal(preview.vars && Object.keys(preview.vars as object).length, 1);
+  assert.deepEqual(preview.durable_objects, { bindings: [{ name: 'SSH_SESSIONS', class_name: 'SSHSessionDO', script_name: 'edgessh' }] });
 });
 
 test('worker, database and custom domain can be configured for another account', () => {
@@ -107,6 +119,8 @@ test('invalid account, resource, domain and runtime configuration fail validatio
     () => readDeploymentSettings(template, { ...env, CUSTOM_DOMAIN: 'edgessh.example.workers.dev' }),
     /CUSTOM_DOMAIN.*workers\.dev/,
   );
+  assert.throws(() => readDeploymentSettings(template, { ...env, PREVIEW_DOMAIN: 'edgessh-preview.workers.dev' }), /PREVIEW_DOMAIN.*workers\.dev/);
+  assert.throws(() => readDeploymentSettings(template, { ...env, WORKER_NAME: 'a'.repeat(63) }), /-preview/);
   assert.throws(() => readDeploymentSettings({
     ...template, vars: { ENCRYPTION_KEY: env.ENCRYPTION_KEY },
   }, env), /Secret/);

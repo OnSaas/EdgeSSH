@@ -2,6 +2,7 @@ import { api, saveHost, removeHost, refreshHostLocation, type CloudHost, type Ho
 import type { HostGlobe } from './globe';
 import type { FilePage } from './file-page';
 import type { Snippets } from './snippets';
+import { ForwardPage } from './forward-page';
 import { countryFlag } from './flags';
 import { systemIcon } from './os-icons';
 import './dashboard.css';
@@ -19,6 +20,7 @@ const icons = {
   home: '<path d="m3 10 9-7 9 7v10H3Z"/><path d="M9 20v-7h6v7"/>',
   server: '<rect x="4" y="3" width="16" height="7" rx="2"/><rect x="4" y="14" width="16" height="7" rx="2"/><path d="M8 6.5h.01M8 17.5h.01M15 6.5h2M15 17.5h2"/>',
   terminal: '<path d="m5 6 6 6-6 6m8 0h6"/>',
+  forward: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 8h18M7 14h10m-3-3 3 3-3 3"/>',
   snippets: '<path d="M9 3H7a2 2 0 0 0-2 2v4l-2 3 2 3v4a2 2 0 0 0 2 2h2m6-18h2a2 2 0 0 1 2 2v4l2 3-2 3v4a2 2 0 0 1-2 2h-2"/>',
   folder: '<path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M3 9h18"/>',
   shield: '<path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6Z"/><path d="m8 12 3 3 5-6"/>',
@@ -40,6 +42,7 @@ export class Dashboard {
   private returnFocus?: HTMLElement;
   private readonly dialog: HTMLDialogElement;
   private readonly form: HTMLFormElement;
+  private readonly forwarding = new ForwardPage();
 
   constructor(private readonly actions: DashboardActions) {
     this.root.id = 'dashboard';
@@ -56,6 +59,7 @@ export class Dashboard {
           <button class="rail-item" id="rail-hosts">${icon('server')}<span>主机</span></button>
           <button class="rail-item" id="rail-files">${icon('folder')}<span>文件管理</span></button>
           <button class="rail-item" id="rail-snippets">${icon('snippets')}<span>代码片段</span></button>
+          <button class="rail-item" id="rail-forward">${icon('forward')}<span>端口转发</span></button>
           <button class="rail-item" id="quick-connect">${icon('terminal')}<span>快速连接</span></button>
           <span class="rail-security" title="管理员身份认证">${icon('shield')}<span id="auth-provider-label">身份<br>保护</span></span>
         </nav>
@@ -110,6 +114,7 @@ export class Dashboard {
     document.body.prepend(this.root);
     this.get('.home-layout').append(this.actions.files.root);
     this.get('.home-layout').append(this.actions.snippets.page);
+    this.get('.home-layout').append(this.forwarding.root);
     this.dialog = this.get<HTMLDialogElement>('.host-dialog');
     this.form = this.get<HTMLFormElement>('#cloud-host-form');
     this.get('#account-action').addEventListener('click', async (event) => {
@@ -135,6 +140,7 @@ export class Dashboard {
     });
     this.get('#rail-files').addEventListener('click', () => this.showFiles());
     this.get('#rail-snippets').addEventListener('click', () => this.showSnippets());
+    this.get('#rail-forward').addEventListener('click', () => this.showForwarding());
     for (const id of ['#quick-connect', '#bottom-quick']) this.get(id).addEventListener('click', () => {
       if (this.busy || !this.actions.files.confirmLeave()) return;
       this.actions.leaveWorkspace();
@@ -164,6 +170,10 @@ export class Dashboard {
     files.className = 'icon-button home-back'; files.textContent = '文件管理'; files.type = 'button';
     files.addEventListener('click', () => this.showFiles());
     document.querySelector('#app .topbar-actions')!.prepend(files);
+    const forwarding = document.createElement('button');
+    forwarding.className = 'icon-button home-back'; forwarding.textContent = '端口转发'; forwarding.type = 'button';
+    forwarding.addEventListener('click', () => this.showForwarding());
+    document.querySelector('#app .topbar-actions')!.append(forwarding);
     this.show();
   }
 
@@ -197,6 +207,7 @@ export class Dashboard {
   setHosts(hosts: CloudHost[]): void {
     this.hosts = hosts;
     this.actions.files.setHosts(hosts);
+    this.forwarding.setHosts(hosts);
     if (this.group && !hosts.some((host) => host.group === this.group)) this.group = '';
     this.renderFilters(); this.renderList();
     this.globe?.setHosts(hosts);
@@ -213,6 +224,7 @@ export class Dashboard {
   }
 
   show(): void {
+    this.forwarding.hide();
     this.actions.files.hide();
     this.actions.snippets.hide();
     this.isHome = true; this.root.hidden = false;
@@ -224,6 +236,7 @@ export class Dashboard {
   }
 
   openWorkspace(): void {
+    this.forwarding.hide();
     this.actions.files.hide();
     this.actions.snippets.hide();
     this.isHome = false; this.root.hidden = true;
@@ -235,6 +248,7 @@ export class Dashboard {
   }
 
   showFiles(): void {
+    this.forwarding.hide();
     this.actions.snippets.hide();
     this.isHome = false; this.root.hidden = false;
     this.get('.home-content').hidden = true;
@@ -247,6 +261,7 @@ export class Dashboard {
 
   showSnippets(): void {
     if (!this.actions.files.confirmLeave()) return;
+    this.forwarding.hide();
     // 仅切换视图，不结束 SSH；在片段页编辑后可回到同一会话。
     this.actions.files.hide();
     this.isHome = false; this.root.hidden = false;
@@ -256,6 +271,19 @@ export class Dashboard {
     this.selectNavigation('rail-snippets');
     this.globe?.setActive(false);
     this.actions.snippets.show();
+  }
+
+  showForwarding(): void {
+    if (!this.actions.files.confirmLeave()) return;
+    this.actions.files.hide();
+    this.actions.snippets.hide();
+    this.isHome = false; this.root.hidden = false;
+    this.get('.home-content').hidden = true;
+    document.getElementById('app')!.hidden = true;
+    document.body.dataset.view = 'forward';
+    this.selectNavigation('rail-forward');
+    this.globe?.setActive(false);
+    this.forwarding.show();
   }
 
   private selectNavigation(id: string): void {

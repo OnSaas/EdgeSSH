@@ -21,6 +21,11 @@ interface AccessPolicy {
 }
 
 export async function resolveWorkerHostname(api: CloudflareApi, settings: DeploymentSettings): Promise<string> {
+  const subdomain = await resolveWorkersDevSubdomain(api, settings);
+  return `${settings.workerName}.${subdomain}.workers.dev`;
+}
+
+export async function resolveWorkersDevSubdomain(api: CloudflareApi, settings: DeploymentSettings): Promise<string> {
   const path = `/accounts/${settings.accountId}/workers/subdomain`;
   let subdomain: string | null = null;
   try {
@@ -34,7 +39,7 @@ export async function resolveWorkerHostname(api: CloudflareApi, settings: Deploy
     subdomain = `${settings.workerName}-${settings.accountId.slice(0, 8)}`;
     await api.request(path, 'PUT', { subdomain });
   }
-  return `${settings.workerName}.${subdomain}.workers.dev`;
+  return subdomain;
 }
 
 export async function ensureAccess(

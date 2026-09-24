@@ -10,6 +10,7 @@ export interface DeploymentSettings {
   databaseName: string;
   databaseId?: string;
   customDomain?: string;
+  previewDomain?: string;
   authProvider: 'cloudflare' | 'github';
   githubClientId?: string;
   githubAdmin?: string;
@@ -38,6 +39,7 @@ export function readDeploymentSettings(
   if (accountId && !/^[a-f0-9]{32}$/i.test(accountId)) throw new Error('CLOUDFLARE_ACCOUNT_ID 必须是 32 位十六进制账户 ID。');
   const workerName = env.WORKER_NAME?.trim() || String(template.name);
   if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(workerName)) throw new Error('WORKER_NAME 必须是 1–63 位小写字母、数字或连字符，且不能以连字符开头。');
+  if (`${workerName}-preview`.length > 63) throw new Error('WORKER_NAME 加上 -preview 后不能超过 63 位。');
 
   const databases = template.d1_databases as TomlTable[] | undefined;
   const database = databases?.find((binding) => binding.binding === 'DB');
@@ -56,6 +58,13 @@ export function readDeploymentSettings(
   }
   if (customDomain?.toLowerCase().endsWith('.workers.dev')) {
     throw new Error('CUSTOM_DOMAIN 不能填写 workers.dev 地址；使用 Worker 自带域名时请删除或留空该配置。');
+  }
+  const previewDomain = env.PREVIEW_DOMAIN?.trim();
+  if (previewDomain && !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(previewDomain)) {
+    throw new Error('PREVIEW_DOMAIN 只能填写完整域名，不能包含协议、路径或通配符。');
+  }
+  if (previewDomain?.toLowerCase().endsWith('.workers.dev')) {
+    throw new Error('PREVIEW_DOMAIN 不能填写 workers.dev 地址；请使用自定义跨站域名，或留空自动生成预览地址。');
   }
 
   const adminEmail = authProvider === 'cloudflare' ? env.ADMIN_EMAIL?.trim().toLowerCase() : undefined;
@@ -98,7 +107,7 @@ export function readDeploymentSettings(
 
   return {
     accountId, apiToken: env.CLOUDFLARE_API_TOKEN!.trim(), workerName,
-    databaseName, databaseId, customDomain, authProvider, githubClientId, githubAdmin, githubAdminId,
+    databaseName, databaseId, customDomain, previewDomain, authProvider, githubClientId, githubAdmin, githubAdminId,
     adminEmail, identityProviderIds, secrets,
   };
 }
@@ -107,7 +116,7 @@ export function createDeploymentConfig(
   template: TomlTable,
   settings: DeploymentSettings,
   database: Database,
-  runtime?: { hostname: string; githubAdminId?: string },
+  runtime?: { hostname: string; previewOrigin?: string; githubAdminId?: string },
 ): TomlTable {
   return {
     ...template,
@@ -120,6 +129,7 @@ export function createDeploymentConfig(
       ...template.vars as TomlTable,
       AUTH_PROVIDER: settings.authProvider,
       ...(runtime ? { APP_ORIGIN: `https://${runtime.hostname}` } : {}),
+      ...(runtime?.previewOrigin ? { PREVIEW_ORIGIN: runtime.previewOrigin } : {}),
       ...(settings.authProvider === 'github' ? {
         GITHUB_CLIENT_ID: settings.githubClientId!,
         ...(runtime?.githubAdminId ? { GITHUB_ADMIN_ID: runtime.githubAdminId } : {}),
@@ -130,4 +140,18 @@ export function createDeploymentConfig(
       ? { ...binding, database_name: database.name, database_id: database.uuid }
       : binding),
   };
+}
+
+export function createPreviewDeploymentConfig(template: TomlTable, settings: DeploymentSettings, previewOrigin: string): TomlTable {
+  const previewTemplate = {
+    name: `${settings.workerName}-preview`,
+    main: 'src/preview-worker.ts',
+    compatibility_date: template.compatibility_date,
+    workers_dev: !settings.previewDomain,
+    preview_urls: false,
+    vars: { PREVIEW_ORIGIN: previewOrigin },
+    durable_objects: { bindings: [{ name: 'SSH_SESSIONS', class_name: 'SSHSessionDO', script_name: settings.workerName }] },
+    ...(settings.previewDomain ? { routes: [{ pattern: settings.previewDomain, custom_domain: true }] } : {}),
+  };
+  return previewTemplate as TomlTable;
 }

@@ -80,6 +80,22 @@ export class SSHChannel {
     return payload;
   }
 
+  buildOpenDirectTCPIP(channelID: number, host: string, port: number): Uint8Array {
+    this.localChannelID = channelID;
+    const fields = [encodeString('direct-tcpip'), encodeString(host), encodeString('127.0.0.1')];
+    const payload = new Uint8Array(1 + fields[0].length + 12 + fields[1].length + 4 + fields[2].length + 4);
+    payload[0] = SSH_MSG_CHANNEL_OPEN;
+    let offset = writeBytes(payload, 1, fields[0]);
+    for (const value of [channelID, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET_SIZE]) {
+      writeUint32(payload, offset, value); offset += 4;
+    }
+    offset = writeBytes(payload, offset, fields[1]);
+    writeUint32(payload, offset, port); offset += 4;
+    offset = writeBytes(payload, offset, fields[2]);
+    writeUint32(payload, offset, 0);
+    return payload;
+  }
+
   handleOpenConfirmation(payload: Uint8Array): void {
     if (payload.length !== 17) throw new Error('Malformed channel open confirmation');
     if (readUint32(payload, 1) !== this.localChannelID) throw new Error('Channel confirmation has an unexpected recipient');

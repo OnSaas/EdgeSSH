@@ -3,20 +3,22 @@ import { appendFile, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { parse, stringify } from 'smol-toml';
 import { ensureDatabase } from './cloudflare-d1.ts';
-import { createDeploymentConfig, readDeploymentSettings } from './deployment-config.ts';
+import { createDeploymentConfig, createPreviewDeploymentConfig, readDeploymentSettings } from './deployment-config.ts';
 import { CloudflareApi, resolveAccountId } from './cloudflare-api.ts';
-import { resolveWorkerHostname } from './cloudflare-access.ts';
+import { resolveWorkersDevSubdomain } from './cloudflare-access.ts';
+import { previewOrigin } from '../src/forwarding/security.ts';
 import { maskSecrets, prepareEncryptionSecret, readWorkerSecretNames, readWorkerVariable } from './deployment-secrets.ts';
 import { prepareAuthentication, requiredAuthSecrets } from './deployment-auth.ts';
 import { readWorkspaceState, updateWorkspaceState } from './workspace-state.ts';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const generatedConfig = '.wrangler.generated.toml';
+const previewGeneratedConfig = '.wrangler.preview.generated.toml';
 const wrangler = fileURLToPath(new URL('../node_modules/wrangler/bin/wrangler.js', import.meta.url));
 
-async function runWrangler(args: string[], input?: string): Promise<void> {
+async function runWrangler(args: string[], input?: string, configPath = generatedConfig): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(process.execPath, [wrangler, ...args, '--config', generatedConfig], {
+    const child = spawn(process.execPath, [wrangler, ...args, '--config', configPath], {
       cwd: root,
       env: { ...process.env, CI: 'true' },
       stdio: [input === undefined ? 'ignore' : 'pipe', 'inherit', 'inherit'],
@@ -42,7 +44,10 @@ async function main(): Promise<void> {
   settings.accountId = await resolveAccountId(api, settings.accountId);
   process.env.CLOUDFLARE_ACCOUNT_ID = settings.accountId;
   const existingSecrets = await readWorkerSecretNames(api, settings);
-  const hostname = settings.customDomain || await resolveWorkerHostname(api, settings);
+  const workersSubdomain = await resolveWorkersDevSubdomain(api, settings);
+  const hostname = settings.customDomain || `${settings.workerName}.${workersSubdomain}.workers.dev`;
+  const previewHostname = settings.previewDomain || `${settings.workerName}-preview.${workersSubdomain}.workers.dev`;
+  const preview = previewOrigin(`https://${previewHostname}`, `https://${hostname}`);
   const database = await ensureDatabase(settings);
   const workspace = await readWorkspaceState(api, settings, database);
   const deployedProvider = workspace.authProvider
@@ -63,7 +68,7 @@ async function main(): Promise<void> {
   const secrets = { ...authentication.secrets, ...await prepareEncryptionSecret(api, settings, database, existingSecrets) };
   maskSecrets(secrets);
   const config = createDeploymentConfig(template, settings, database, {
-    hostname, githubAdminId: authentication.githubAdminId,
+    hostname, previewOrigin: preview, githubAdminId: authentication.githubAdminId,
   });
   // 临时配置放在仓库根目录，保持 assets、main、migrations_dir 的相对路径语义。
   await writeFile(new URL(`../${generatedConfig}`, import.meta.url), stringify(config), 'utf8');
@@ -72,14 +77,17 @@ async function main(): Promise<void> {
   // Secret 只通过标准输入发送，不写临时文件或命令行参数；首次部署由 Wrangler 创建草稿 Worker。
   if (Object.keys(secrets).length) await runWrangler(['secret', 'bulk'], JSON.stringify(secrets));
   await runWrangler(['deploy']);
-  // Worker 成功发布后再切换状态；失败的发布不会让旧版本提前失去当前认证方式。
   await updateWorkspaceState(api, settings, database, workspace, authentication.githubAdminId);
   // Wrangler 默认保留既有 Secret；部署后再次核对名称，避免把缺少认证的版本当作成功。
   const deployedSecrets = await readWorkerSecretNames(api, settings);
   for (const name of ['ENCRYPTION_KEY', ...requiredAuthSecrets(settings.authProvider)]) {
     if (!deployedSecrets.has(name)) throw new Error(`部署后缺少 Worker Secret：${name}。`);
   }
-  console.log(`部署完成：https://${hostname}`);
+  // 预览 Worker 只做代理入口和 DO 绑定，不执行迁移、不写入任何 Secret。
+  const previewConfig = createPreviewDeploymentConfig(template, settings, preview);
+  await writeFile(new URL(`../${previewGeneratedConfig}`, import.meta.url), stringify(previewConfig), 'utf8');
+  await runWrangler(['deploy'], undefined, previewGeneratedConfig);
+  console.log(`部署完成：https://${hostname}，预览：https://${previewHostname}`);
   if (process.env.GITHUB_STEP_SUMMARY) {
     await appendFile(process.env.GITHUB_STEP_SUMMARY,
       `## EdgeSSH 部署完成\n\n入口：https://${hostname}\n\n登录方式：${settings.authProvider}\n\n`

@@ -11,6 +11,7 @@
 | `AUTH_PROVIDER` | Variable | `cloudflare`（默认） | `github` |
 | `CLOUDFLARE_API_TOKEN` | Secret | 必填 | 必填 |
 | `CUSTOM_DOMAIN` | Variable | 推荐填写实际主机名 | 推荐填写实际主机名 |
+| `PREVIEW_DOMAIN` | Variable | 仅填预览 hostname；留空自动生成 | 仅填预览 hostname；留空自动生成 |
 | `ADMIN_EMAIL` | Variable | 管理员邮箱 | 不需要 |
 | `GITHUB_CLIENT_ID` | Variable | 不需要 | OAuth App 的 Client ID |
 | `GITHUB_CLIENT_SECRET` | Secret | 不需要 | OAuth App 的 Client Secret |
@@ -62,6 +63,19 @@ GitHub OAuth App 必须由用户在 GitHub 创建；普通 GitHub Token 没有�
 
 API Token 只存 GitHub Secret，不放普通变量、代码或命令行输入框。不要将 Token 填到 Run workflow 的邮箱字段。
 
+## 独立预览 Worker 与端口转发
+
+远端网站可能已被入侵并返回恶意 JavaScript。同源代理会让它代发主站 SSH API；`HttpOnly` 只能保护 Cookie，挡不住同源脚本调用接口。独立 Worker 本身不代表不同 site：若仍在同一 site，主站 Cookie 仍有风险，因此必须使用跨 site 的预览域名。
+
+- 部署先发布主 Worker，再发布只绑定 `SSH_SESSIONS` 的预览 Worker；预览不绑定 D1、ASSETS、加密密钥或主站接口。
+- `PREVIEW_DOMAIN` 是 Actions Variable，只填 hostname。未配置时默认 `<WORKER_NAME>-preview.<账户子域>.workers.dev`。
+- `ssh.example.com` + 默认 `workers.dev` 可行；`ssh.example.com` + `preview.example.com` 会拒绝；同一账户下两个 `workers.dev` 也会拒绝。主站只有 `workers.dev` 时，必须为预览配置独立的自定义域名。
+- 运行时 `PREVIEW_ORIGIN` 由部署脚本生成并写入两个 Worker，用户不需要手工修改主配置。
+
+使用主机管理页选择主机和端口（例如 `127.0.0.1` HTTP），确认指纹后打开新预览窗口；管理页保留在原窗口。停止转发、离开预览页或 SSH 断线后，预览失效。数据流为：主站登录 -> SSH Durable Object -> 一次性 fragment -> 预览 HttpOnly capability -> 远端 HTTP。票据 60 秒内只能兑换一次；兑换后的授权最长 1 小时，二者不是同一时限。
+
+预览支持 HTTP/SSE、相对资源、表单、目标 Cookie、重定向和 HTTP Basic 鉴权；仅支持 HTTP 上游 `127.0.0.1`。上传上限 16 MiB，不改变 SFTP 的 64 MiB 限制；最多 24 个并发通道；60 秒是请求通道闲置超时，不是整个 SSH 连接的 60 秒寿命。不支持 HTTPS 上游、WebSocket、Service Worker、JavaScript 写死 `localhost` 或 OAuth 固定 callback。同一预览 origin 内的网站不相互隔离，切换前关闭旧窗口，只用于一个网站且不要分享。主站跨 site 只能防止登录态被预览站点盗取，不代表预览网站本身安全。
+
 ## 自动执行顺序
 
 1. 校验本地配置，运行类型检查、测试、前端构建和 Wrangler dry-run。
@@ -101,6 +115,7 @@ EdgeSSH-Auto-Update: true
 | `D1_DATABASE_ID` | Variable | 指定已有 D1 UUID，不填则按名称查找 |
 | `ACCESS_IDP_IDS` | Variable | 新应用采用的 IdP UUID，多个用逗号分隔 |
 | `GITHUB_ADMIN_ID` | Variable | 仅显式更换 GitHub 管理员时填写数字用户 ID |
+| `PREVIEW_DOMAIN` | Variable | 预览 hostname；留空为 `<WORKER_NAME>-preview.<账户子域>.workers.dev` |
 | `ENCRYPTION_KEY` | Secret，仅恢复/迁移使用 | 仅 Worker 尚无密钥时使用；已有密钥不会覆盖 |
 
 `DB`、`SSH_SESSIONS`、`ASSETS` 是资源绑定，不是需要用户创建的变量。`CONNECT_TIMEOUT_MS` 已有默认值 `10000`。

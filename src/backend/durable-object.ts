@@ -3,6 +3,8 @@ import { parseConnectMessage, type Env } from '../types';
 import { assertPublicTarget, toSocketHostname } from './security';
 import { createTicket, verifyTicket } from './security';
 import { SSHSession } from './session';
+import { ForwardingState } from '../forwarding/state';
+import { previewError } from '../forwarding/security';
 
 interface MainAttachment { role: 'main'; phase: 'waiting' | 'connecting' | 'connected' }
 interface SFTPAttachment { role: 'sftp'; phase: 'connected' }
@@ -30,6 +32,7 @@ export class SSHSessionDO implements DurableObject {
   private readonly state: DurableObjectState;
   private readonly env: Env;
   private readonly sessions = new Map<WebSocket, SSHSession>();
+  private readonly forwarding = new ForwardingState();
   private readonly pendingConnections = new Map<WebSocket, PendingConnection>();
   private readonly deadlines = new Map<WebSocket, ReturnType<typeof setTimeout>>();
   private readonly sftpAttachTokens = new Map<string, SFTPAttachToken>();
@@ -60,6 +63,8 @@ export class SSHSessionDO implements DurableObject {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    // 此入口只由独立预览 Worker 的 DO binding 调用，不暴露在主站 HTTP 路由中。
+    if (url.pathname === '/preview-launch' || url.pathname === '/preview-http') return this.forwarding.preview(request);
     const accountId = request.headers.get('x-account-id');
     if (!accountId) return Response.json({ error: 'Authentication required' }, { status: 401 });
     if (url.pathname === '/ticket' && request.method === 'POST') {
@@ -80,6 +85,20 @@ export class SSHSessionDO implements DurableObject {
     // 主通道和辅助通道均绑定签发票据的账户，持有别人的 URL 也不能附着会话。
     if (await this.state.storage.get('account-id') !== accountId) {
       return Response.json({ error: 'Session owner mismatch' }, { status: 403 });
+    }
+    if (url.pathname === '/forward') {
+      if (request.method === 'DELETE') {
+        this.forwarding.stop();
+        return Response.json({ ok: true }, { headers: { 'Cache-Control': 'no-store' } });
+      }
+      if (request.method !== 'POST') return previewError('Method not allowed', 405);
+      const session = [...this.sessions.values()].find((item) => item.isForwardReady());
+      if (!session) return previewError('请先建立端口转发 SSH 连接。', 409);
+      const { port } = await request.json<{ port: number }>();
+      const origin = request.headers.get('x-preview-origin');
+      if (!Number.isInteger(port) || port < 1 || port > 65535 || !origin) return previewError('Invalid forwarding configuration', 400);
+      try { return await this.forwarding.create(session, port, origin, this.state.id.toString()); }
+      catch { return previewError('远端端口不可达或 SSH 服务未允许 TCP 转发。', 502); }
     }
     if (url.pathname === '/sftp') return this.attachSFTP(request);
     if (url.pathname === '/processes') return this.attachProcesses(request);
@@ -419,6 +438,7 @@ export class SSHSessionDO implements DurableObject {
   }
 
   private cleanup(ws: WebSocket): void {
+    this.forwarding.clear();
     this.clearDeadline(ws);
     const token = this.sftpTokenByMainWebSocket.get(ws);
     if (token) this.deleteSFTPAttachToken(token);

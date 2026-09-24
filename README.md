@@ -114,6 +114,7 @@ SSH 握手、密钥交换、认证与通道逻辑在 Worker 内完成。浏览�
 | `AUTH_PROVIDER` | Variable | `cloudflare` | `github` |
 | `CLOUDFLARE_API_TOKEN` | Secret | 必填 | 必填，不需要 Access 权限 |
 | `CUSTOM_DOMAIN` | Variable | 推荐，如 `ssh.example.com` | 推荐，如 `ssh.example.com` |
+| `PREVIEW_DOMAIN` | Variable | 预览入口 hostname；仅填域名 | 预览入口 hostname；仅填域名 |
 | `ADMIN_EMAIL` | Variable | 管理员邮箱，也可在 Run workflow 输入 | 不填 |
 | `GITHUB_CLIENT_ID` | Variable | 不填 | OAuth App 的 Client ID |
 | `GITHUB_CLIENT_SECRET` | Secret | 不填 | OAuth App 的 Client Secret |
@@ -161,6 +162,7 @@ npm ci
 | `D1_DATABASE_ID` | `00000000-0000-4000-8000-000000000001` | 复用明确指定的数据库 |
 | `ACCESS_IDP_IDS` | `一个或多个 IdP UUID，以逗号分隔` | 创建新应用时使用已有 GitHub/其他 IdP，而非自动配置 OTP |
 | `GITHUB_ADMIN_ID` | `12345678` | 仅在明确更换 GitHub 管理员时填写 |
+| `PREVIEW_DOMAIN` | `preview.example.com` | 预览入口 hostname；留空自动生成 `<Worker 名>-preview.<账户 workers.dev 子域>` |
 
 `ENCRYPTION_KEY` 由部署流程管理并持久保存在 **Cloudflare Worker Secrets**；Cloudflare 模式另存 `ACCESS_TEAM_DOMAIN`、`ACCESS_AUD`，GitHub 模式同步 `GITHUB_CLIENT_SECRET`。不需要用户复制自动生成的值回 GitHub。加密密钥只在首次部署生成，后续保留，即使 GitHub 留有旧值也不会覆盖线上密钥。不要删除 Worker 或其加密密钥；Cloudflare 不提供密钥明文读回，丢失后无法解密已有资料。
 
@@ -215,6 +217,16 @@ EdgeSSH/
 
 ## 安全与限制
 
+### 独立预览 Worker
+
+远端网站可能已被入侵并返回恶意 JavaScript。若代理与主站同源，脚本就能代发主站 SSH 管理 API；HttpOnly 只能保护 Cookie，不能阻止同源脚本调用接口。部署会先发布主 Worker，再发布只绑定 `SSH_SESSIONS` 的预览 Worker；预览不持有 D1、ASSETS 或任何 Secret。不同 Worker 不必然代表不同 site：普通域名比较末两段，`workers.dev` 比较末三段；同账户双 workers.dev 会明确拒绝，跨 site 隔离是保护主站会话边界的必要成本。
+
+凭据只在 URL fragment 中短暂传递，随后立即换成 HttpOnly Cookie；票据一次性使用，断线或 1 小时后失效。支持常规资源、表单、目标 Cookie、Location 跳转和 HTTP Basic 鉴权。首版仅支持 HTTP-only 回环 `127.0.0.1`，上传上限 16 MiB、最多 24 个并发 SSH 通道、闲置 60 秒；不支持 HTTPS、WebSocket、Service Worker、硬编码 localhost 的 JavaScript 或 OAuth 固定回调。SFTP 文件上传仍是独立的 64 MiB 限制。同一预览 origin 内的网站不再相互隔离；切换前关闭旧预览，只用于一个网站，不能对外分享。
+
+### 端口转发
+
+在主机管理页选择主机和端口转发类型（例如 `127.0.0.1` 的 HTTP），确认 SSH 主机指纹后，系统会打开新的预览窗口。管理页会保留在原窗口；停止转发、离开预览页或 SSH 断线后，预览立即失效。预览票据只使用一次，不能分享给他人。
+
 ### 安全边界
 
 - **不是端到端加密**：Worker 是实际的 SSH 客户端，会在会话内处理明文凭据。请仅部署到可信账户，并使用最小权限的 SSH 账号或密钥。
@@ -232,8 +244,9 @@ EdgeSSH/
 | 私钥认证 | 未加密 OpenSSH Ed25519、RSA、ECDSA P-256/P-384/P-521 |
 | 主机管理 | 单一管理员工作区最多 200 台；不提供多租户或独立用户资料 |
 | 终端编码 | UTF-8、GB18030、Big5，取决于浏览器解码支持 |
+| 端口转发 | HTTP/SSE、相对资源、表单、Cookie、重定向、HTTP Basic 鉴权 |
 
-暂不支持加密私钥、PEM/PKCS#8 私钥、SSH Agent、多因素键盘交互认证、SCP、端口转发、ProxyJump、SSH 压缩与会话内 rekey；不支持出站 TCP 25 端口。
+暂不支持加密私钥、PEM/PKCS#8 私钥、SSH Agent、多因素键盘交互认证、SCP、ProxyJump、SSH 压缩与会话内 rekey；不支持出站 TCP 25 端口。
 
 ### 独立文件管理
 

@@ -12,5 +12,6 @@ deliverables/
 frontend/dist-*
 scripts-tmp/
 .wrangler.generated.toml
+.wrangler.preview.generated.toml
 test-results/
 playwright-report/

@@ -49,6 +49,7 @@ import { encodeString, readUint32, toBufferSource } from '../ssh/utils';
 import { parseTopSnapshot } from './top-parser';
 import { retainTrailingMarkerPrefix } from './process-framing';
 import { parseSystemProbe, SYSTEM_PROBE_COMMAND } from './system-info';
+import { ForwardChannel } from '../forwarding/channel';
 
 type Cipher = SSHAESGCMCipher | SSHAESCTRCipher;
 type Phase = 'version' | 'kex' | 'host-confirm' | 'auth' | 'pty' | 'shell' | 'ready' | 'closed';
@@ -136,6 +137,7 @@ export class SSHSession {
   private readonly parser = new SSHPacketParser();
   private readonly shellChannel = new SSHChannel();
   private readonly channels = new Map<number, SSHChannel>([[0, this.shellChannel]]);
+  private readonly forwards = new Map<number, ForwardChannel>();
   private readonly config: SSHConnectionConfig;
   private readonly ws: WebSocket;
   private readonly socket: Socket;
@@ -208,9 +210,33 @@ export class SSHSession {
     this.readTask = this.readLoop();
   }
 
+  isForwardReady(): boolean { return this.config.mode === 'forward' && this.phase === 'ready'; }
+
+  async openForward(port: number): Promise<ForwardChannel> {
+    if (!this.isForwardReady()) throw new Error('Forwarding SSH connection is not ready');
+    if (this.forwards.size >= 24) throw new Error('Too many forwarding requests');
+    const id = this.nextChannelID++;
+    const forward = new ForwardChannel({
+      send: (payload) => this.sendEncrypted(payload),
+      data: (channel, chunk) => this.sendChannelData(channel, chunk),
+      remove: () => { this.forwards.delete(id); },
+    });
+    this.forwards.set(id, forward);
+    try {
+      // 只开放所选 SSH 主机的 IPv4 回环服务，不提供任意内网目标代理。
+      await this.sendEncrypted(forward.channel.buildOpenDirectTCPIP(id, '127.0.0.1', port));
+      await forward.opened;
+      return forward;
+    } catch (error) {
+      forward.abort(new Error('Unable to open forwarding channel'));
+      throw error;
+    }
+  }
+
   async handleClientMessage(message: string | ArrayBuffer): Promise<void> {
     if (this.phase === 'closed') return;
     if (message instanceof ArrayBuffer) {
+      if (this.config.mode === 'forward') throw new Error('Terminal input is disabled for forwarding sessions');
       if (message.byteLength > 64 * 1024) throw new Error('Binary terminal input exceeds 64 KiB');
       this.queueInput(new Uint8Array(message));
       return;
@@ -231,6 +257,7 @@ export class SSHSession {
       this.sendJson({ type: 'pong' });
       return;
     }
+    if (this.config.mode === 'forward') throw new Error('Terminal input is disabled for forwarding sessions');
     const resize = value.type === 'resize'
       ? [value.cols, value.rows]
       : Array.isArray(value.resize) ? value.resize : null;
@@ -249,6 +276,8 @@ export class SSHSession {
   close(normal = false): void {
     if (this.phase === 'closed') return;
     this.phase = 'closed';
+    for (const forward of this.forwards.values()) forward.abort(new Error('SSH session closed'));
+    this.forwards.clear();
     if (this.keepaliveTimer) clearInterval(this.keepaliveTimer);
     if (this.shellTimer) clearTimeout(this.shellTimer);
     this.keepaliveTimer = null;
@@ -633,6 +662,12 @@ export class SSHSession {
       if (!this.authRequestSent) throw new Error('SSH authentication completed before credentials were sent');
       this.config.password = undefined;
       this.config.privateKey = undefined;
+      if (this.config.mode === 'forward') {
+        this.phase = 'ready';
+        this.startKeepalive();
+        this.sendJson({ type: 'ready' });
+        return;
+      }
       this.status('auth_success', 'SSH authentication succeeded; opening terminal');
       this.phase = 'pty';
       this.startKeepalive();
@@ -658,6 +693,8 @@ export class SSHSession {
   private async handleChannel(type: number, payload: Uint8Array): Promise<void> {
     if (payload.length < 5) throw new Error('Malformed SSH channel message');
     const channelID = readUint32(payload, 1);
+    const forward = this.forwards.get(channelID);
+    if (forward) { await forward.handle(type, payload); return; }
     const channel = this.channels.get(channelID);
     if (!channel) throw new Error('SSH channel message has an unknown recipient');
     const isShell = channel === this.shellChannel;
