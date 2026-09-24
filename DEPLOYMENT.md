@@ -11,7 +11,7 @@
 | `AUTH_PROVIDER` | Variable | `cloudflare`（默认） | `github` |
 | `CLOUDFLARE_API_TOKEN` | Secret | 必填 | 必填 |
 | `CUSTOM_DOMAIN` | Variable | 推荐填写实际主机名 | 推荐填写实际主机名 |
-| `PREVIEW_DOMAIN` | Variable | 仅填预览 hostname；留空自动生成 | 仅填预览 hostname；留空自动生成 |
+| `PREVIEW_DOMAIN` | Variable | 可选；仅部署独立预览 Worker 时使用 | 可选；仅部署独立预览 Worker 时使用 |
 | `ADMIN_EMAIL` | Variable | 管理员邮箱 | 不需要 |
 | `GITHUB_CLIENT_ID` | Variable | 不需要 | OAuth App 的 Client ID |
 | `GITHUB_CLIENT_SECRET` | Secret | 不需要 | OAuth App 的 Client Secret |
@@ -65,16 +65,20 @@ API Token 只存 GitHub Secret，不放普通变量、代码或命令行输入�
 
 ## 独立预览 Worker 与端口转发
 
-远端网站可能已被入侵并返回恶意 JavaScript。同源代理会让它代发主站 SSH API；`HttpOnly` 只能保护 Cookie，挡不住同源脚本调用接口。独立 Worker 本身不代表不同 site：若仍在同一 site，主站 Cookie 仍有风险，因此必须使用跨 site 的预览域名。
+| 模式 | 默认入口 | 适用场景 | 部署要求 |
+| --- | --- | --- | --- |
+| `trusted` | 主 Worker `/_forward/<session>/` | 你信任的目标网站 | 无需第二 Worker；默认模式 |
+| `isolated` | 独立预览 Worker | 不可信或可能被入侵的目标网站 | Actions 运行 `部署预览 Worker`，预览域名必须跨 site |
 
-- 部署先发布主 Worker，再发布只绑定 `SSH_SESSIONS` 的预览 Worker；预览不绑定 D1、ASSETS、加密密钥或主站接口。
-- `PREVIEW_DOMAIN` 是 Actions Variable，只填 hostname。未配置时默认 `<WORKER_NAME>-preview.<账户子域>.workers.dev`。
-- `ssh.example.com` + 默认 `workers.dev` 可行；`ssh.example.com` + `preview.example.com` 会拒绝；同一账户下两个 `workers.dev` 也会拒绝。主站只有 `workers.dev` 时，必须为预览配置独立的自定义域名。
-- 运行时 `PREVIEW_ORIGIN` 由部署脚本生成并写入两个 Worker，用户不需要手工修改主配置。
+同源路径、HttpOnly Cookie 和新窗口不是沙箱；恶意脚本仍可代发主站 SSH API。主站 Cookie 不会转发给远端，但不防同源 JavaScript 调用接口。界面会显示风险警告并要求信任确认；连接期间禁用切换，用户需先点击停止再切换。未部署预览 Worker 时选择 isolated 不会回退到标准转发，而是明确拒绝连接。
 
-使用主机管理页选择主机和端口（例如 `127.0.0.1` HTTP），确认指纹后打开新预览窗口；管理页保留在原窗口。停止转发、离开预览页或 SSH 断线后，预览失效。数据流为：主站登录 -> SSH Durable Object -> 一次性 fragment -> 预览 HttpOnly capability -> 远端 HTTP。票据 60 秒内只能兑换一次；兑换后的授权最长 1 小时，二者不是同一时限。
+普通 push 或 `Deploy` 只发布主 Worker，不新建 preview。需要 isolated 时，运行 Actions **部署预览 Worker**，该 workflow 先更新主 Worker 配置，再调用原可复用 Deploy 并传入 `deploy_preview=true`，仅该流程设置 `DEPLOY_PREVIEW_WORKER`；可选填写 `PREVIEW_DOMAIN`，留空默认 `<WORKER_NAME>-preview.<账户子域>.workers.dev`。它发布只绑定 `SSH_SESSIONS` 的预览 Worker，不绑定 D1、ASSETS、加密密钥或主站接口，并设置主站 `PREVIEW_ORIGIN`。已有 `PREVIEW_ORIGIN` 在常规发布中保留，不自动删除；普通发布不会更新预览代码，修改预览实现时须重新运行该 workflow，现有预览 Worker 无需重新部署即可在界面切换。
 
-预览支持 HTTP/SSE、相对资源、表单、目标 Cookie、重定向和 HTTP Basic 鉴权；仅支持 HTTP 上游 `127.0.0.1`。上传上限 16 MiB，不改变 SFTP 的 64 MiB 限制；最多 24 个并发通道；60 秒是请求通道闲置超时，不是整个 SSH 连接的 60 秒寿命。不支持 HTTPS 上游、WebSocket、Service Worker、JavaScript 写死 `localhost` 或 OAuth 固定 callback。同一预览 origin 内的网站不相互隔离，切换前关闭旧窗口，只用于一个网站且不要分享。主站跨 site 只能防止登录态被预览站点盗取，不代表预览网站本身安全。
+主站与预览必须跨 site：自定义域名加默认 `workers.dev` 可行；自定义域名加同站自定义域名会拒绝；同账户双 `workers.dev` 也会拒绝，主站只有 `workers.dev` 时需独立自定义域名。专用 preview 同一 origin 内不同目标网站不相互隔离，切换前关闭旧预览窗口。
+
+操作步骤：在端口转发页面选择主机和端口转发类型（如 `127.0.0.1` HTTP）→ 选择 `trusted` 或 `isolated`（trusted 需勾选界面信任确认，isolated 不需要）→ 确认指纹并连接。连接期间禁用模式切换，需先点击停止再切换。停止主站连接、离开主站端口转发管理页、刷新页面或 SSH 断线后预览失效；仅关闭目标预览 tab 不保证停止。isolated 票据 60 秒内只能兑换一次，兑换后的授权最长 1 小时；trusted 链接依赖主站登录及账户绑定，不使用一次性 fragment。
+
+标准实现改写 HTML 属性、`srcset`、CSS URL、`Location`、Cookie 名称与 Path，并注入常见 `fetch`/XHR/EventSource/history/cookie 兼容脚本；不承诺任意网站透明代理。严格 CSP、动态 ES 模块、写死的 location、复杂 inline CSS/JS 框架仍可能需要 baseURL 配置，优先使用 isolated。仅支持 HTTP/SSE、相对资源、表单、目标 Cookie、重定向和 HTTP Basic 鉴权；HTTP 上游限 `127.0.0.1`，上传 16 MiB，CSS 重写 2 MiB，最多 24 个并发通道，通道闲置 60 秒。HTTPS 上游、WebSocket、Service Worker、写死 `localhost`、OAuth 固定 callback 不支持；SFTP 上传仍为 64 MiB。
 
 ## 自动执行顺序
 
@@ -90,7 +94,7 @@ API Token 只存 GitHub Secret，不放普通变量、代码或命令行输入�
 
 生产任务通过 concurrency 串行运行，失败可修正原因后重跑，已创建的资源会复用。请勿用多个仓库同时管理同一个 Worker。
 
-设置自定义域名时关闭备用 `workers.dev` 入口，所有部署关闭 preview URL。Cloudflare 模式校验 Access JWT；GitHub 模式使用 state、PKCE 和签名 HttpOnly Cookie。缺少认证不降级为匿名 SSH。
+设置自定义域名时关闭备用 `workers.dev` 入口；两个 Worker 都关闭 Cloudflare 版本预览 URL；独立 workflow 发布专用 preview Worker 的正式地址。Cloudflare 模式校验 Access JWT；GitHub 模式使用 state、PKCE 和签名 HttpOnly Cookie。缺少认证不降级为匿名 SSH。
 
 ## 官方强制更新
 
@@ -115,7 +119,7 @@ EdgeSSH-Auto-Update: true
 | `D1_DATABASE_ID` | Variable | 指定已有 D1 UUID，不填则按名称查找 |
 | `ACCESS_IDP_IDS` | Variable | 新应用采用的 IdP UUID，多个用逗号分隔 |
 | `GITHUB_ADMIN_ID` | Variable | 仅显式更换 GitHub 管理员时填写数字用户 ID |
-| `PREVIEW_DOMAIN` | Variable | 预览 hostname；留空为 `<WORKER_NAME>-preview.<账户子域>.workers.dev` |
+| `PREVIEW_DOMAIN` | Variable | 仅 `部署预览 Worker` 使用；留空为 `<WORKER_NAME>-preview.<账户子域>.workers.dev` |
 | `ENCRYPTION_KEY` | Secret，仅恢复/迁移使用 | 仅 Worker 尚无密钥时使用；已有密钥不会覆盖 |
 
 `DB`、`SSH_SESSIONS`、`ASSETS` 是资源绑定，不是需要用户创建的变量。`CONNECT_TIMEOUT_MS` 已有默认值 `10000`。

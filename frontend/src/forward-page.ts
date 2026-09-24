@@ -1,7 +1,7 @@
 import { api, hostCredentials, type CloudHost } from './cloud-api';
 import './forward-page.css';
 
-/** 转发持有独立 SSH 连接，不借用终端，防止预览页获得命令输入能力。 */
+/** 转发持有独立 SSH 连接；标准模式与主站同源，不能当作恶意脚本的安全边界。 */
 export class ForwardPage {
   readonly root = document.createElement('main');
   private hosts: CloudHost[] = [];
@@ -18,6 +18,9 @@ export class ForwardPage {
   private readonly stopButton: HTMLButtonElement;
   private readonly openButton: HTMLButtonElement;
   private readonly keyDialog: HTMLDialogElement;
+  private readonly mode: HTMLSelectElement;
+  private readonly trust: HTMLInputElement;
+  private previewAvailable = false;
   private pendingKey?: { socket: WebSocket; fingerprint: string };
 
   constructor() {
@@ -26,24 +29,35 @@ export class ForwardPage {
     this.root.innerHTML = `
       <header class="home-section-heading"><div><p class="home-eyebrow">PRIVATE WEB PREVIEW</p>
         <h1 tabindex="-1">端口转发</h1><p>通过 SSH，打开只监听在服务器本机的网站。</p></div>
-        <span class="forward-badge">独立站点隔离</span></header>
+        <span class="forward-badge" data-mode-badge>标准路径转发</span></header>
+      <aside class="forward-warning" data-trust-warning role="note"><strong>标准转发仅用于可信网站</strong>
+        <p>网站与 EdgeSSH 主站同源。恶意脚本可能借用你的登录态调用主机管理或 SSH 接口；不同路径、新窗口和 HttpOnly 都不能隔离它。不要用此模式打开不可信或疑似被入侵的网站。</p></aside>
       <section class="forward-card" aria-label="端口转发设置">
         <form class="forward-form">
+          <label class="forward-mode-field">转发方式<select name="mode" aria-describedby="forward-mode-help">
+            <option value="trusted">标准转发 · 本 Worker 路径（仅可信网站）</option>
+            <option value="isolated">隔离预览 · 独立 Worker（不可信网站）</option>
+          </select></label>
+          <p id="forward-mode-help" class="forward-hint forward-wide">默认无需部署第二个 Worker。选择隔离预览可查看启用方法。</p>
           <label>目标主机<select name="host" required aria-describedby="forward-host-hint"><option value="">请选择主机</option></select></label>
           <label>网站端口<input name="port" type="number" min="1" max="65535" value="8080" required inputmode="numeric"></label>
           <button class="home-button primary" type="submit">连接并打开网站 ↗</button>
           <button class="home-button" type="button" data-stop disabled>停止转发</button>
+          <label class="forward-trust forward-wide"><input name="trusted" type="checkbox" required>我确认该网站及其脚本可信，接受与 SSH 主站同源的风险。</label>
         </form>
         <p id="forward-host-hint" class="forward-hint">访问目标固定为所选服务器的 <code>http://127.0.0.1:端口</code>，不是你电脑的本机端口。</p>
         <div class="forward-status"><span data-status role="status" aria-live="polite">未连接 · 请选择主机和网站端口</span>
           <button class="home-button" type="button" data-open hidden>重新打开预览 ↗</button></div>
-        <a data-preview-link target="_blank" rel="noopener noreferrer" hidden>弹窗被拦截？点击打开隔离预览 ↗</a>
+        <a data-preview-link target="_blank" rel="noopener noreferrer" hidden>弹窗被拦截？点击打开网站 ↗</a>
+        <div class="forward-setup" data-preview-setup hidden><strong>尚未启用隔离预览</strong>
+          <p>在 GitHub 仓库的 Actions 中运行「部署预览 Worker」工作流。可在 Settings → Secrets and variables → Actions 设置 PREVIEW_DOMAIN；不填则使用默认 workers.dev 地址。预览域名必须与主站跨站。</p>
+          <p>部署完成后重新进入此页，再选择「隔离预览」。此模式不会回退到标准转发。</p></div>
       </section>
       <section class="forward-explanation" aria-label="隔离与使用说明">
-        <h2>让网站留在另一扇窗里</h2>
-        <p>远端网站可能包含不可信脚本。预览在独立 Worker、独立站点打开，不共享 EdgeSSH 登录 Cookie，也不提供主机管理或终端接口。</p>
+        <h2>可信网站简单用，不可信网站单独隔离</h2>
+        <p>标准转发使用当前 Worker 的独立路径，不增加部署资源。隔离预览使用可选的独立 Worker 和跨站域名，不共享主站登录 Cookie。</p>
         <ol><li>选择云端主机，输入网站的 HTTP 端口。</li><li>核对 SSH 主机指纹，连接后自动打开预览。</li><li>用完点击停止；离开此页面、刷新或断线后，转发立即失效。</li></ol>
-        <p class="forward-hint">支持常见资源、表单、网站 Cookie、HTTP 登录和重定向。单次授权最长 1 小时，上传最多 16 MiB。首版不支持 HTTPS 上游、WebSocket、Service Worker，以及脚本内写死的 localhost 地址。同一预览域名一次只使用一个网站，请先关闭旧预览窗口再切换。</p>
+        <p class="forward-hint">支持常见资源、表单、网站 Cookie、HTTP 登录和重定向。授权最长 1 小时，上传最多 16 MiB。不支持 HTTPS 上游、WebSocket、Service Worker。标准模式兼容常见 fetch / XHR，但不是任意网站的透明代理；复杂 SPA、动态模块或硬编码跳转可能需要网站配置 base URL。同一隔离预览域名一次只使用一个网站，切换前关闭旧窗口。</p>
       </section>
       <dialog class="host-dialog" aria-labelledby="forward-key-heading">
         <h2 id="forward-key-heading">核对 SSH 主机指纹</h2>
@@ -52,12 +66,16 @@ export class ForwardPage {
         <div class="dialog-actions"><button class="home-button" type="button" data-key-reject>取消连接</button>
           <button class="home-button primary" type="button" data-key-accept>信任并连接</button></div>
       </dialog>`;
-    this.select = this.get('select');
-    this.port = this.get('input');
+    this.select = this.get('[name="host"]');
+    this.port = this.get('[name="port"]');
+    this.mode = this.get('[name="mode"]');
+    this.trust = this.get('[name="trusted"]');
     this.startButton = this.get('[type="submit"]');
     this.stopButton = this.get('[data-stop]');
     this.openButton = this.get('[data-open]');
     this.keyDialog = this.get('dialog');
+    this.mode.addEventListener('change', () => { this.trust.checked = false; this.render(); });
+    this.trust.addEventListener('change', () => this.render());
     this.get('[data-key-accept]').addEventListener('click', () => {
       const pending = this.pendingKey;
       if (pending?.socket.readyState === WebSocket.OPEN) {
@@ -89,7 +107,12 @@ export class ForwardPage {
     this.render();
   }
 
-  show(): void { this.root.hidden = false; this.get('h1').focus(); }
+  show(): void {
+    this.root.hidden = false; this.get('h1').focus();
+    void api<{ previewAvailable: boolean }>('/api/forwarding').then((config) => {
+      this.previewAvailable = config.previewAvailable === true; this.render();
+    }).catch(() => { this.previewAvailable = false; this.render(); });
+  }
   hide(): void {
     if (this.root.hidden) return;
     this.stop();
@@ -97,9 +120,20 @@ export class ForwardPage {
   }
 
   private render(): void {
+    const isolated = this.mode.value === 'isolated';
     this.select.disabled = this.busy || this.ready;
     this.port.disabled = this.busy || this.ready;
-    this.startButton.disabled = this.busy || this.ready || !this.hosts.length;
+    this.mode.disabled = this.busy || this.ready;
+    this.trust.disabled = this.busy || this.ready || isolated;
+    this.trust.required = !isolated;
+    this.get('.forward-trust').hidden = isolated;
+    this.get('[data-trust-warning]').hidden = isolated;
+    this.get('[data-preview-setup]').hidden = !isolated || this.previewAvailable;
+    this.get('[data-mode-badge]').textContent = isolated ? '跨站隔离预览' : '标准路径转发';
+    this.get('#forward-mode-help').textContent = isolated
+      ? (this.previewAvailable ? '独立预览 Worker 已启用。网站内容将在另一个站点打开。' : '需要先运行「部署预览 Worker」工作流。未启用时不会降级转发。')
+      : '无需第二个 Worker；与主站同源，仅可访问可信网站。连接后请先停止再切换方式。';
+    this.startButton.disabled = this.busy || this.ready || !this.hosts.length || (isolated ? !this.previewAvailable : !this.trust.checked);
     this.startButton.textContent = this.busy ? '正在连接…' : '连接并打开网站 ↗';
     this.stopButton.disabled = !this.busy && !this.ready;
     this.openButton.hidden = !this.ready;
@@ -118,6 +152,7 @@ export class ForwardPage {
 
   private async start(): Promise<void> {
     if (this.busy || this.ready) return;
+    if (this.mode.value === 'trusted' ? !this.trust.checked : !this.previewAvailable) return;
     const host = this.hosts.find((item) => item.id === this.select.value);
     if (!host) { this.message('请先选择一台已保存的主机。'); return; }
     const port = Number(this.port.value);
@@ -177,7 +212,10 @@ export class ForwardPage {
     this.get('[data-preview-link]').hidden = true;
     try {
       const { url, expiresAt } = await api<{ url: string; expiresAt: number }>(
-        `/api/forwarding?session=${this.sessionId}`, 'POST', { port: Number(this.port.value) });
+        `/api/forwarding?session=${this.sessionId}`, 'POST', {
+          port: Number(this.port.value), mode: this.mode.value,
+          ...(this.mode.value === 'trusted' ? { trusted: this.trust.checked } : {}),
+        });
       if (generation !== this.generation) return;
       this.ready = true;
       const link = this.get<HTMLAnchorElement>('[data-preview-link]');
@@ -199,6 +237,7 @@ export class ForwardPage {
     this.socket?.close(); this.socket = undefined;
     // 主 WebSocket 关闭就是撤销操作；无需依赖卸载页面时不可靠的异步 fetch。
     this.sessionId = undefined; this.busy = false; this.ready = false;
+    this.trust.checked = false;
     this.get('[data-preview-link]').hidden = true;
     this.get<HTMLAnchorElement>('[data-preview-link]').removeAttribute('href');
     this.message(message); this.render();

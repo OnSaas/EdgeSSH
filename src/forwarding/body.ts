@@ -1,5 +1,5 @@
 /** 小型授权接口也可能收到流式大请求：边读边限制，而不是 text() 后才检查。 */
-export async function readBoundedText(request: Request, limit: number): Promise<string> {
+export async function readBoundedText(request: Pick<Request, 'body'>, limit: number): Promise<string> {
   if (!request.body) return '';
   const reader = request.body.getReader();
   const decoder = new TextDecoder();

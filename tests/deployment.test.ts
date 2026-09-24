@@ -13,6 +13,7 @@ const env = {
   ENCRYPTION_KEY: Buffer.alloc(32, 1).toString('base64'),
   ACCESS_TEAM_DOMAIN: 'example.cloudflareaccess.com',
   ACCESS_AUD: 'test-audience',
+  DEPLOY_PREVIEW_WORKER: 'true',
 };
 const settings = readDeploymentSettings(template, env);
 const database = { uuid: '00000000-0000-4000-8000-000000000001', name: 'edgessh-accounts' };
@@ -124,6 +125,17 @@ test('invalid account, resource, domain and runtime configuration fail validatio
   assert.throws(() => readDeploymentSettings({
     ...template, vars: { ENCRYPTION_KEY: env.ENCRYPTION_KEY },
   }, env), /Secret/);
+});
+
+test('preview validation and main-only config follow DEPLOY_PREVIEW_WORKER', () => {
+  const disabled = readDeploymentSettings(template, { ...env, DEPLOY_PREVIEW_WORKER: 'false', PREVIEW_DOMAIN: 'not a domain' });
+  assert.equal(disabled.deployPreview, false);
+  assert.equal(disabled.previewDomain, undefined);
+  const config = createDeploymentConfig(template, disabled, database, { hostname: 'edgessh.example.com' });
+  assert.equal((config.vars as Record<string, string>).PREVIEW_ORIGIN, undefined);
+  const existing = createDeploymentConfig(template, disabled, database, { hostname: 'edgessh.example.com', previewOrigin: 'https://existing.example.com' });
+  assert.equal((existing.vars as Record<string, string>).PREVIEW_ORIGIN, 'https://existing.example.com');
+  assert.throws(() => readDeploymentSettings(template, { ...env, DEPLOY_PREVIEW_WORKER: 'true', PREVIEW_DOMAIN: 'not a domain' }), /PREVIEW_DOMAIN/);
 });
 
 test('database lookup reuses an existing database without any writes', async () => {

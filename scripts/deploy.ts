@@ -5,7 +5,7 @@ import { parse, stringify } from 'smol-toml';
 import { ensureDatabase } from './cloudflare-d1.ts';
 import { createDeploymentConfig, createPreviewDeploymentConfig, readDeploymentSettings } from './deployment-config.ts';
 import { CloudflareApi, resolveAccountId } from './cloudflare-api.ts';
-import { resolveWorkersDevSubdomain } from './cloudflare-access.ts';
+import { resolveWorkerHostname, resolveWorkersDevSubdomain } from './cloudflare-access.ts';
 import { previewOrigin } from '../src/forwarding/security.ts';
 import { maskSecrets, prepareEncryptionSecret, readWorkerSecretNames, readWorkerVariable } from './deployment-secrets.ts';
 import { prepareAuthentication, requiredAuthSecrets } from './deployment-auth.ts';
@@ -44,10 +44,13 @@ async function main(): Promise<void> {
   settings.accountId = await resolveAccountId(api, settings.accountId);
   process.env.CLOUDFLARE_ACCOUNT_ID = settings.accountId;
   const existingSecrets = await readWorkerSecretNames(api, settings);
-  const workersSubdomain = await resolveWorkersDevSubdomain(api, settings);
-  const hostname = settings.customDomain || `${settings.workerName}.${workersSubdomain}.workers.dev`;
-  const previewHostname = settings.previewDomain || `${settings.workerName}-preview.${workersSubdomain}.workers.dev`;
-  const preview = previewOrigin(`https://${previewHostname}`, `https://${hostname}`);
+  const hostname = settings.customDomain || await resolveWorkerHostname(api, settings);
+  let preview = await readWorkerVariable(api, settings, 'PREVIEW_ORIGIN');
+  let previewHostname: string | undefined;
+  if (settings.deployPreview) {
+    previewHostname = settings.previewDomain || `${settings.workerName}-preview.${await resolveWorkersDevSubdomain(api, settings)}.workers.dev`;
+    preview = previewOrigin(`https://${previewHostname}`, `https://${hostname}`);
+  }
   const database = await ensureDatabase(settings);
   const workspace = await readWorkspaceState(api, settings, database);
   const deployedProvider = workspace.authProvider
@@ -68,7 +71,7 @@ async function main(): Promise<void> {
   const secrets = { ...authentication.secrets, ...await prepareEncryptionSecret(api, settings, database, existingSecrets) };
   maskSecrets(secrets);
   const config = createDeploymentConfig(template, settings, database, {
-    hostname, previewOrigin: preview, githubAdminId: authentication.githubAdminId,
+    hostname, ...(preview ? { previewOrigin: preview } : {}), githubAdminId: authentication.githubAdminId,
   });
   // 临时配置放在仓库根目录，保持 assets、main、migrations_dir 的相对路径语义。
   await writeFile(new URL(`../${generatedConfig}`, import.meta.url), stringify(config), 'utf8');
@@ -84,13 +87,15 @@ async function main(): Promise<void> {
     if (!deployedSecrets.has(name)) throw new Error(`部署后缺少 Worker Secret：${name}。`);
   }
   // 预览 Worker 只做代理入口和 DO 绑定，不执行迁移、不写入任何 Secret。
-  const previewConfig = createPreviewDeploymentConfig(template, settings, preview);
-  await writeFile(new URL(`../${previewGeneratedConfig}`, import.meta.url), stringify(previewConfig), 'utf8');
-  await runWrangler(['deploy'], undefined, previewGeneratedConfig);
-  console.log(`部署完成：https://${hostname}，预览：https://${previewHostname}`);
+  if (settings.deployPreview) {
+    const previewConfig = createPreviewDeploymentConfig(template, settings, preview!);
+    await writeFile(new URL(`../${previewGeneratedConfig}`, import.meta.url), stringify(previewConfig), 'utf8');
+    await runWrangler(['deploy'], undefined, previewGeneratedConfig);
+  }
+  console.log(`部署完成：https://${hostname}${settings.deployPreview ? `，预览：https://${previewHostname}` : '（仅主 Worker）'}`);
   if (process.env.GITHUB_STEP_SUMMARY) {
     await appendFile(process.env.GITHUB_STEP_SUMMARY,
-      `## EdgeSSH 部署完成\n\n入口：https://${hostname}\n\n登录方式：${settings.authProvider}\n\n`
+      `## EdgeSSH 部署完成\n\n入口：https://${hostname}\n\n${settings.deployPreview ? `预览：https://${previewHostname}\n\n` : ''}登录方式：${settings.authProvider}\n\n`
       + (settings.authProvider === 'github' ? `GitHub OAuth 回调地址：https://${hostname}/auth/callback\n\n` : '')
       + 'D1 已迁移，运行时 Secret 已保存在 Cloudflare。后续部署保留原加密密钥与管理员资料。\n');
   }

@@ -42,3 +42,16 @@ test('stripHopHeaders removes declared connection tokens', () => {
   assert.equal(headers.has('upgrade'), false);
   assert.equal(headers.has('keepalive'), true);
 });
+
+test('trusted cookies are namespaced and never forward host login cookies', () => {
+  const request = new Request('https://main.test/_forward/abc/', { headers: {
+    Cookie: 'ef_abc_sid=ok; __Host-edgessh-session=main; CF_Authorization=access; ef_other_no=bad',
+  }});
+  const headers = upstreamHeaders(request, 8080, 'https://main.test', '/_forward/abc');
+  assert.equal(headers.get('cookie'), 'sid=ok');
+  const result = previewHeaders(new Headers([
+    ['Set-Cookie', 'sid=abc; Path=/; Domain=internal.test'],
+    ['Set-Cookie', '__Host-edgessh-session=bad; Path=/'],
+  ]), 8080, 'https://main.test', '/_forward/abc');
+  assert.deepEqual(result.getSetCookie(), ['ef_abc_sid=abc; Path=/_forward/abc/; Secure; Max-Age=3600']);
+});

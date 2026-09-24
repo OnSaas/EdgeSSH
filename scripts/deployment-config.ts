@@ -11,6 +11,7 @@ export interface DeploymentSettings {
   databaseId?: string;
   customDomain?: string;
   previewDomain?: string;
+  deployPreview?: boolean;
   authProvider: 'cloudflare' | 'github';
   githubClientId?: string;
   githubAdmin?: string;
@@ -39,7 +40,10 @@ export function readDeploymentSettings(
   if (accountId && !/^[a-f0-9]{32}$/i.test(accountId)) throw new Error('CLOUDFLARE_ACCOUNT_ID 必须是 32 位十六进制账户 ID。');
   const workerName = env.WORKER_NAME?.trim() || String(template.name);
   if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(workerName)) throw new Error('WORKER_NAME 必须是 1–63 位小写字母、数字或连字符，且不能以连字符开头。');
-  if (`${workerName}-preview`.length > 63) throw new Error('WORKER_NAME 加上 -preview 后不能超过 63 位。');
+  const deployPreviewValue = env.DEPLOY_PREVIEW_WORKER?.trim().toLowerCase() || 'false';
+  if (deployPreviewValue !== 'true' && deployPreviewValue !== 'false') throw new Error('DEPLOY_PREVIEW_WORKER 只能是 true 或 false。');
+  const deployPreview = deployPreviewValue === 'true';
+  if (deployPreview && `${workerName}-preview`.length > 63) throw new Error('WORKER_NAME 加上 -preview 后不能超过 63 位。');
 
   const databases = template.d1_databases as TomlTable[] | undefined;
   const database = databases?.find((binding) => binding.binding === 'DB');
@@ -59,11 +63,11 @@ export function readDeploymentSettings(
   if (customDomain?.toLowerCase().endsWith('.workers.dev')) {
     throw new Error('CUSTOM_DOMAIN 不能填写 workers.dev 地址；使用 Worker 自带域名时请删除或留空该配置。');
   }
-  const previewDomain = env.PREVIEW_DOMAIN?.trim();
-  if (previewDomain && !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(previewDomain)) {
+  const previewDomain = deployPreview ? env.PREVIEW_DOMAIN?.trim() : undefined;
+  if (deployPreview && previewDomain && !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(previewDomain)) {
     throw new Error('PREVIEW_DOMAIN 只能填写完整域名，不能包含协议、路径或通配符。');
   }
-  if (previewDomain?.toLowerCase().endsWith('.workers.dev')) {
+  if (deployPreview && previewDomain?.toLowerCase().endsWith('.workers.dev')) {
     throw new Error('PREVIEW_DOMAIN 不能填写 workers.dev 地址；请使用自定义跨站域名，或留空自动生成预览地址。');
   }
 
@@ -107,7 +111,7 @@ export function readDeploymentSettings(
 
   return {
     accountId, apiToken: env.CLOUDFLARE_API_TOKEN!.trim(), workerName,
-    databaseName, databaseId, customDomain, previewDomain, authProvider, githubClientId, githubAdmin, githubAdminId,
+    databaseName, databaseId, customDomain, previewDomain, deployPreview, authProvider, githubClientId, githubAdmin, githubAdminId,
     adminEmail, identityProviderIds, secrets,
   };
 }

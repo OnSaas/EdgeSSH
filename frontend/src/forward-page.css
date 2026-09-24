@@ -1,6 +1,12 @@
 body[data-view='forward'] { overflow-y: auto; background: var(--home-bg); }
 .forward-page { min-width: 0; width: 100%; max-width: 1240px; margin-inline: auto; padding: 36px 32px; }
 .forward-card { padding: 24px; border: 1px solid var(--home-line); border-radius: 10px; background: var(--home-surface); }
+.forward-warning { border: 1px solid var(--home-accent); border-left-width: 4px; border-radius: 8px; padding: 18px 22px; margin-bottom: 20px; background: var(--home-accent-soft); }
+.forward-warning p { margin: 8px 0 0; line-height: 1.8; }
+.forward-mode-field, .forward-wide { grid-column: 1 / -1; }
+#dashboard .forward-form .forward-trust { display: flex; align-items: flex-start; gap: 10px; font-size: 14px; line-height: 1.7; font-weight: 400; }
+#dashboard .forward-form .forward-trust input { width: 18px; height: 18px; flex: 0 0 18px; margin-top: 3px; accent-color: var(--home-accent); }
+.forward-setup { margin-top: 20px; border-top: 1px solid var(--home-line); padding-top: 18px; line-height: 1.8; }
 .forward-badge { padding: 6px 10px; border-radius: 5px; background: var(--home-accent-soft); color: var(--home-accent-hover); font-size: 12px; white-space: nowrap; }
 .forward-form { display: grid; grid-template-columns: minmax(180px, 1fr) 130px auto auto; align-items: end; gap: 16px; }
 .forward-form label { display: grid; gap: 8px; min-width: 0; font-weight: 600; }

@@ -1,5 +1,7 @@
 import type { ForwardChannel } from './channel.ts';
 import { PREVIEW_COOKIE, PREVIEW_PREFIX } from './security.ts';
+import { mountURL, mountCookie, mountCSS, mountSrcset, upstreamCookies, RUNTIME_PATH } from './mount.ts';
+import { readBoundedText } from './body.ts';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('latin1');
@@ -13,10 +15,11 @@ export function stripHopHeaders(headers: Headers): void {
 }
 
 function isInternalCookie(name: string): boolean {
-  return name.toLowerCase() === PREVIEW_COOKIE.toLowerCase() || /^cf_authorization$/i.test(name);
+  return name.toLowerCase() === PREVIEW_COOKIE.toLowerCase() || /^cf_authorization$/i.test(name)
+    || /^__host-edgessh-session$/i.test(name);
 }
 
-export function upstreamHeaders(request: Request, port: number, origin: string): Headers {
+export function upstreamHeaders(request: Request, port: number, origin: string, base = ''): Headers {
   const headers = new Headers(request.headers);
   stripHopHeaders(headers);
   const headerNames: string[] = [];
@@ -29,36 +32,40 @@ export function upstreamHeaders(request: Request, port: number, origin: string):
   headers.set('Connection', 'close');
   // 不压缩便于 HTML 属性中的绝对 localhost 地址重写；二进制响应仍保持原始字节。
   headers.set('Accept-Encoding', 'identity');
-  const cookies = (headers.get('Cookie') ?? '').split(';').filter((part) => {
+  const cookies = base ? upstreamCookies(headers.get('Cookie') ?? '', base) : (headers.get('Cookie') ?? '').split(';').filter((part) => {
     const index = part.indexOf('=');
     return index > 0 && !isInternalCookie(part.slice(0, index).trim());
   }).join(';').trim();
   if (cookies) headers.set('Cookie', cookies); else headers.delete('Cookie');
   if (headers.get('Origin') === origin) headers.set('Origin', `http://127.0.0.1:${port}`);
   const referer = headers.get('Referer');
-  if (referer?.startsWith(`${origin}/`)) headers.set('Referer', referer.replace(origin, `http://127.0.0.1:${port}`));
+  if (referer?.startsWith(`${origin}${base}/`)) headers.set('Referer', referer.replace(`${origin}${base}`, `http://127.0.0.1:${port}`));
   else headers.delete('Referer');
+  if (base) {
+    headers.set('X-Forwarded-Prefix', base);
+    headers.set('X-Forwarded-Host', new URL(origin).host);
+    headers.set('X-Forwarded-Proto', 'https');
+  }
   return headers;
 }
 
 export function rewriteLocalURL(value: string, port: number, origin: string): string {
-  // 相对路径天然落到预览站根路径；只修正当前端口的回环绝对地址，不扩大代理范围。
-  // 嵌套页面的相对链接和 #fragment 必须留给浏览器解析，不能错误地按 / 作为基准。
-  if (!/^https?:\/\//i.test(value) && !value.startsWith('//')) return value;
-  try {
-    const parsed = new URL(value, `http://127.0.0.1:${port}`);
-    if (parsed.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname)
-      && Number(parsed.port || 80) === port) return `${origin}${parsed.pathname}${parsed.search}${parsed.hash}`;
-  } catch { /* 非 URL 属性原样交给网站 */ }
-  return value;
+  return mountURL(value, port, origin);
 }
 
-export function previewHeaders(source: Headers, port: number, origin: string): Headers {
+export function previewHeaders(source: Headers, port: number, origin: string, base = '', requestPath = '/'): Headers {
   const cookies = source.getSetCookie();
   const headers = new Headers(source);
   stripHopHeaders(headers);
   headers.delete('Set-Cookie');
   for (const cookie of cookies) {
+    if (base) {
+      const name = cookie.slice(0, cookie.indexOf('=')).trim();
+      if (isInternalCookie(name)) continue;
+      const scoped = mountCookie(cookie, base, requestPath);
+      if (scoped) headers.append('Set-Cookie', scoped);
+      continue;
+    }
     const parts = cookie.split(';');
     const name = parts[0].split('=')[0].trim();
     if (isInternalCookie(name)) continue;
@@ -66,7 +73,11 @@ export function previewHeaders(source: Headers, port: number, origin: string): H
     headers.append('Set-Cookie', [parts[0], ...attrs, ' Secure'].join(';'));
   }
   const location = headers.get('Location');
-  if (location) headers.set('Location', rewriteLocalURL(location, port, origin));
+  if (location) {
+    // Location 可用 ../ 逃出挂载路径，先以远端请求路径解析，再映射回当前转发。
+    const target = base ? new URL(location, `http://127.0.0.1:${port}${requestPath}`).href : location;
+    headers.set('Location', mountURL(target, port, origin, base));
+  }
   const refresh = headers.get('Refresh');
   if (refresh) headers.delete('Refresh'); // 不接受无法可靠解析的自动导航头，普通 Location 保留。
   for (const name of ['clear-site-data', 'service-worker-allowed', 'alt-svc', 'report-to', 'nel',
@@ -131,8 +142,8 @@ class HTTPReader {
   }
 }
 
-async function sendRequest(channel: ForwardChannel, request: Request, path: string, port: number, origin: string): Promise<void> {
-  const headers = upstreamHeaders(request, port, origin);
+async function sendRequest(channel: ForwardChannel, request: Request, path: string, port: number, origin: string, base: string): Promise<void> {
+  const headers = upstreamHeaders(request, port, origin, base);
   const length = headers.get('Content-Length');
   if (length !== null && (!/^\d+$/.test(length) || Number(length) > MAX_UPLOAD_BYTES)) throw new Error('Upload is too large');
   const chunked = request.body !== null && length === null;
@@ -159,7 +170,7 @@ async function sendRequest(channel: ForwardChannel, request: Request, path: stri
   } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
 }
 
-export async function proxyHTTP(channel: ForwardChannel, request: Request, port: number, origin: string): Promise<Response> {
+export async function proxyHTTP(channel: ForwardChannel, request: Request, port: number, origin: string, base = ''): Promise<Response> {
   const path = request.headers.get('x-preview-path') ?? '/';
   if (!path.startsWith('/') || /[\s\0]/.test(path) || path.startsWith(PREVIEW_PREFIX)) {
     await channel.close();
@@ -178,14 +189,14 @@ export async function proxyHTTP(channel: ForwardChannel, request: Request, port:
     reader.releaseLock();
     await channel.close();
   };
-  const sending = sendRequest(channel, request, path, port, origin);
+  const sending = sendRequest(channel, request, path, port, origin, base);
   void sending.catch(() => channel.abort(new Error('Unable to send HTTP request')));
   try {
     let parsed = await parser.headers();
     for (let count = 0; parsed.status < 200 && parsed.status !== 101 && count < 4; count++) parsed = await parser.headers();
     if (parsed.status < 200) throw new Error('HTTP upgrades are not supported');
     const { status, headers: source } = parsed;
-    const headers = previewHeaders(source, port, origin);
+    const headers = previewHeaders(source, port, origin, base, path);
     if (request.method === 'HEAD' || [204, 205, 304].includes(status)) {
       await finish();
       return new Response(null, { status, headers });
@@ -239,15 +250,28 @@ export async function proxyHTTP(channel: ForwardChannel, request: Request, port:
     });
     let response = new Response(body, { status, headers, encodeBody: 'manual' });
     if (source.get('Content-Type')?.toLowerCase().includes('text/html') && !source.has('Content-Encoding')) {
-      // 不注入脚本、不缓冲 HTML，常见绝对资源链接与表单 action 按属性逐一修正。
-      response = new HTMLRewriter().on('*', {
+      const rewriter = new HTMLRewriter().on('*', {
         element(element) {
           for (const name of ['href', 'src', 'action', 'formaction', 'poster']) {
             const value = element.getAttribute(name);
-            if (value) element.setAttribute(name, rewriteLocalURL(value, port, origin));
+            if (value) element.setAttribute(name, mountURL(value, port, origin, base));
+          }
+          if (base) {
+            const style = element.getAttribute('style');
+            if (style) element.setAttribute('style', mountCSS(style, port, origin, base));
+            const srcset = element.getAttribute('srcset');
+            if (srcset) element.setAttribute('srcset', mountSrcset(srcset, port, origin, base));
           }
         },
-      }).transform(response);
+      });
+      // 只有可信同源模式注入兼容脚本；隔离模式保持原站页面，不扩大其权限。
+      if (base) rewriter.on('head', { element: (element) => {
+        element.prepend(`<script src="${base}${RUNTIME_PATH}"></script>`, { html: true });
+      } });
+      response = rewriter.transform(response);
+    } else if (base && source.get('Content-Type')?.toLowerCase().includes('text/css') && !source.has('Content-Encoding')) {
+      const css = await readBoundedText(response, 2 * 1024 * 1024);
+      response = new Response(mountCSS(css, port, origin, base), { status, headers });
     }
     return response;
   } catch (error) { await finish(); throw error; }

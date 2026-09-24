@@ -25,6 +25,16 @@ async function prepared() {
   return { state, session, launchToken: capability.token };
 }
 
+test('trusted grants use the main origin path and do not accept isolated preview tokens', async () => {
+  const session = fakeSession();
+  const state = new ForwardingState();
+  const response = await state.create(session as never, 8080, 'https://main.test', sessionId, 'trusted');
+  const body = await response.json() as { url: string };
+  assert.equal(body.url, `https://main.test/_forward/${sessionId}/`);
+  assert.equal((await state.preview(new Request('https://internal/preview'))).status, 410);
+  state.clear();
+});
+
 test('launch token is single-use and returns preview token', async () => {
   const { state, session, launchToken } = await prepared();
   try {

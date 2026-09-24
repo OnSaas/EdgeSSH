@@ -20,6 +20,11 @@ on:
         description: 需要检出并部署的提交 SHA
         required: false
         type: string
+      deploy_preview:
+        description: 是否同时部署预览 Worker
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: production-deploy
@@ -49,6 +54,7 @@ jobs:
       # 域名本身不是敏感信息，推荐使用 Variable；同时兼容已将它保存为 Secret 的仓库。
       CUSTOM_DOMAIN: ${{ secrets.CUSTOM_DOMAIN || vars.CUSTOM_DOMAIN }}
       PREVIEW_DOMAIN: ${{ vars.PREVIEW_DOMAIN }}
+      DEPLOY_PREVIEW_WORKER: ${{ inputs.deploy_preview && 'true' || 'false' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4

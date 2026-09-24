@@ -114,7 +114,7 @@ SSH 握手、密钥交换、认证与通道逻辑在 Worker 内完成。浏览�
 | `AUTH_PROVIDER` | Variable | `cloudflare` | `github` |
 | `CLOUDFLARE_API_TOKEN` | Secret | 必填 | 必填，不需要 Access 权限 |
 | `CUSTOM_DOMAIN` | Variable | 推荐，如 `ssh.example.com` | 推荐，如 `ssh.example.com` |
-| `PREVIEW_DOMAIN` | Variable | 预览入口 hostname；仅填域名 | 预览入口 hostname；仅填域名 |
+| `PREVIEW_DOMAIN` | Variable | 可选；仅在部署独立预览 Worker 时填写 hostname | 可选；仅在部署独立预览 Worker 时填写 hostname |
 | `ADMIN_EMAIL` | Variable | 管理员邮箱，也可在 Run workflow 输入 | 不填 |
 | `GITHUB_CLIENT_ID` | Variable | 不填 | OAuth App 的 Client ID |
 | `GITHUB_CLIENT_SECRET` | Secret | 不填 | OAuth App 的 Client Secret |
@@ -162,11 +162,11 @@ npm ci
 | `D1_DATABASE_ID` | `00000000-0000-4000-8000-000000000001` | 复用明确指定的数据库 |
 | `ACCESS_IDP_IDS` | `一个或多个 IdP UUID，以逗号分隔` | 创建新应用时使用已有 GitHub/其他 IdP，而非自动配置 OTP |
 | `GITHUB_ADMIN_ID` | `12345678` | 仅在明确更换 GitHub 管理员时填写 |
-| `PREVIEW_DOMAIN` | `preview.example.com` | 预览入口 hostname；留空自动生成 `<Worker 名>-preview.<账户 workers.dev 子域>` |
+| `PREVIEW_DOMAIN` | `preview.example.com` | 可选；仅供 `部署预览 Worker` 使用，留空自动生成 `<Worker 名>-preview.<账户 workers.dev 子域>.workers.dev` |
 
 `ENCRYPTION_KEY` 由部署流程管理并持久保存在 **Cloudflare Worker Secrets**；Cloudflare 模式另存 `ACCESS_TEAM_DOMAIN`、`ACCESS_AUD`，GitHub 模式同步 `GITHUB_CLIENT_SECRET`。不需要用户复制自动生成的值回 GitHub。加密密钥只在首次部署生成，后续保留，即使 GitHub 留有旧值也不会覆盖线上密钥。不要删除 Worker 或其加密密钥；Cloudflare 不提供密钥明文读回，丢失后无法解密已有资料。
 
-推送 `main` 或手动运行 `Deploy` 都会执行检查和部署。只在首次 Run workflow 输入邮箱也可以：后续未提供邮箱时保留已有认证配置。需要更换域名或重新自动配置 Access 时，请再次提供邮箱。
+推送 `main` 或手动运行 `Deploy` 都会执行检查并只部署主 Worker，不会自动新建预览 Worker。需要代理不可信网站时，再从 Actions 手动运行 **部署预览 Worker**；它调用同一套可复用部署逻辑并设置 `deploy_preview=true`，只在该工作流临时设置 `DEPLOY_PREVIEW_WORKER`。只在首次 Run workflow 输入邮箱也可以：后续未提供邮箱时保留已有认证配置。需要更换域名或重新自动配置 Access 时，请再次提供邮箱。
 
 Fork 启用 Actions 后，`Force Update` 每小时检查一次官方 `aozorae/EdgeSSH` 的 `main`。只有当前版本与官方最新版本之间出现带有独立 Git trailer `EdgeSSH-Auto-Update: true` 的提交时，工作流才会将 Fork 的 `main` 精确同步到最新一个标记提交，并在同一次运行中直接部署该 SHA；普通提交不会触发同步。也可从 Actions 页面手动运行检查。该流程会覆盖 Fork 在 `main` 上的自定义提交，自定义开发请保留在其他分支。
 
@@ -219,13 +219,17 @@ EdgeSSH/
 
 ### 独立预览 Worker
 
-远端网站可能已被入侵并返回恶意 JavaScript。若代理与主站同源，脚本就能代发主站 SSH 管理 API；HttpOnly 只能保护 Cookie，不能阻止同源脚本调用接口。部署会先发布主 Worker，再发布只绑定 `SSH_SESSIONS` 的预览 Worker；预览不持有 D1、ASSETS 或任何 Secret。不同 Worker 不必然代表不同 site：普通域名比较末两段，`workers.dev` 比较末三段；同账户双 workers.dev 会明确拒绝，跨 site 隔离是保护主站会话边界的必要成本。
+默认端口转发路径为主 Worker 的 `/_forward/<session>/`，界面默认 **trusted**，只应连接你信任的网站。页面会显示醒目风险警告，并要求勾选信任确认；连接期间禁用 trusted/isolated 切换，用户需先点击停止再切换。路径同源、HttpOnly Cookie 和新窗口都不是沙箱：恶意脚本仍可能代发主站 SSH API；主站 Cookie 不会转发给远端，但这不能防止同源 JavaScript 调用主站接口。
 
-凭据只在 URL fragment 中短暂传递，随后立即换成 HttpOnly Cookie；票据一次性使用，断线或 1 小时后失效。支持常规资源、表单、目标 Cookie、Location 跳转和 HTTP Basic 鉴权。首版仅支持 HTTP-only 回环 `127.0.0.1`，上传上限 16 MiB、最多 24 个并发 SSH 通道、闲置 60 秒；不支持 HTTPS、WebSocket、Service Worker、硬编码 localhost 的 JavaScript 或 OAuth 固定回调。SFTP 文件上传仍是独立的 64 MiB 限制。同一预览 origin 内的网站不再相互隔离；切换前关闭旧预览，只用于一个网站，不能对外分享。
+需要不可信网站时，从 Actions 运行 **部署预览 Worker**（可选填写 `PREVIEW_DOMAIN`，默认 `<Worker 名>-preview.<账户 workers.dev 子域>.workers.dev`）。该工作流先更新主 Worker 配置，再部署只绑定 `SSH_SESSIONS` 的独立 Worker，并设置主站 `PREVIEW_ORIGIN`；普通 push/`Deploy` 只发布主 Worker，已有 `PREVIEW_ORIGIN` 会保留，不会自动删除既有预览，普通发布也不会更新预览代码。现有预览 Worker 保留即可在界面切换；修改预览实现时须重新运行该工作流。运行后在界面选择 **isolated**；选择隔离模式但未部署预览 Worker 时不会回退到标准转发，而是明确拒绝连接。预览域名必须与主站跨 site：同账户双 `workers.dev` 会拒绝，主站仅用 `workers.dev` 时需独立自定义域名。专用预览同一 origin 内的不同目标网站不相互隔离，切换前关闭旧预览窗口。
+
+isolated 模式凭据只在 URL fragment 中短暂传递，随后立即换成 HttpOnly Cookie；fragment 票据每 60 秒只能一次性兑换，断线或 1 小时后失效。trusted 链接依赖主站登录及账户绑定，不使用一次性 fragment。标准实现会改写 HTML 属性、`srcset`、CSS URL、`Location`、Cookie 名称与 Path，并注入常见 `fetch`/XHR/EventSource/history/cookie 兼容脚本；不承诺任意网站透明代理。严格 CSP、动态 ES 模块、写死的 location、复杂 inline CSS/JS 框架仍可能需要 baseURL 配置，优先使用独立隔离模式。
+
+支持 HTTP/SSE、相对资源、表单、目标 Cookie、重定向和 HTTP Basic 鉴权；仅支持 HTTP 上游 `127.0.0.1`。上传上限 16 MiB，CSS 重写上限 2 MiB，最多 24 个并发 SSH 通道；授权最长 1 小时，单通道闲置 60 秒。不支持 HTTPS 上游、WebSocket、Service Worker、JavaScript 写死 `localhost` 或 OAuth 固定 callback。SFTP 文件上传仍是独立的 64 MiB 限制。
 
 ### 端口转发
 
-在主机管理页选择主机和端口转发类型（例如 `127.0.0.1` 的 HTTP），确认 SSH 主机指纹后，系统会打开新的预览窗口。管理页会保留在原窗口；停止转发、离开预览页或 SSH 断线后，预览立即失效。预览票据只使用一次，不能分享给他人。
+在端口转发页面选择主机和端口转发类型（例如 `127.0.0.1` 的 HTTP），确认 SSH 主机指纹后，系统会打开新的预览窗口。管理页会保留在原窗口；用户停止主站连接、离开主站端口转发管理页、刷新页面或 SSH 断线后，预览立即失效；仅关闭目标预览 tab 不保证停止。预览票据只使用一次，不能分享给他人。
 
 ### 安全边界
 

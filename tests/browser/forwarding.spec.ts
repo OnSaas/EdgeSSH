@@ -7,19 +7,26 @@ const host = {
   hasCredential: true, updatedAt: Date.now(),
 };
 
-async function forwardingFixture(page: Page) {
+const sessionId = 'a'.repeat(64);
+const trustedURL = `http://127.0.0.1:5173/_forward/${sessionId}/`;
+
+async function forwardingFixture(page: Page, previewAvailable = true, noHosts = false) {
   const calls: Array<Record<string, unknown>> = [];
   const sockets: WebSocketRoute[] = [];
   const closed: boolean[] = [];
   await page.route('**/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === '/api/auth/me') return route.fulfill({ json: { account: { username: 'Administrator' }, provider: 'cloudflare' } });
-    if (path === '/api/hosts') return route.fulfill({ json: { hosts: [host] } });
+    if (path === '/api/hosts') return route.fulfill({ json: { hosts: noHosts ? [] : [host] } });
     if (path.endsWith('/credentials')) return route.fulfill({ json: { password: 'test-only-password' } });
-    if (path === '/api/session') return route.fulfill({ json: { ticket: 'test-ticket', sessionId: 'session-forward' } });
-    if (path === '/api/forwarding') {
+    if (path === '/api/session') return route.fulfill({ json: { ticket: 'test-ticket', sessionId } });
+    if (path === '/api/forwarding' && route.request().method() === 'GET') {
+      return route.fulfill({ json: { previewAvailable } });
+    }
+    if (path === '/api/forwarding' && route.request().method() === 'POST') {
       calls.push({ type: 'forwarding', body: route.request().postDataJSON() });
-      return route.fulfill({ json: { url: 'https://preview.example.net/__edgessh/start#xxx', expiresAt: Date.now() + 3600000 } });
+      const mode = route.request().postDataJSON().mode;
+      return route.fulfill({ json: { url: mode === 'isolated' ? 'https://isolated.example.net/start#xxx' : trustedURL, expiresAt: Date.now() + 3600000 } });
     }
     return route.fulfill({ json: {} });
   });
@@ -42,22 +49,74 @@ async function forwardingFixture(page: Page) {
 async function startForward(page: Page) {
   await page.locator('.forward-page select[name="host"]').selectOption('alpha');
   await page.locator('.forward-page input[name="port"]').fill('8080');
+  await page.locator('.forward-page input[name="trusted"]').check();
   await page.locator('.forward-page button[type="submit"]').click();
 }
+
+async function chooseForwardMode(page: Page, mode: 'trusted' | 'isolated') {
+  await page.locator('.forward-page select[name="mode"]').selectOption(mode);
+}
+
+test('默认标准模式显示风险警告，隔离模式未配置时仍禁用连接', async ({ page }, testInfo) => {
+  await forwardingFixture(page, false);
+  await expect(page.locator('[data-trust-warning]')).toBeVisible();
+  await expect(page.locator('.forward-page button[type="submit"]')).toBeDisabled();
+  await page.evaluate(() => { window.scrollTo(0, 0); document.body.scrollTo(0, 0); });
+  await page.screenshot({ path: testInfo.outputPath('trusted-mode.png'), fullPage: true });
+  await page.locator('.forward-page select[name="host"]').selectOption('alpha');
+  await expect(page.locator('.forward-page button[type="submit"]')).toBeDisabled();
+  await page.locator('.forward-page input[name="trusted"]').check();
+  await expect(page.locator('.forward-page button[type="submit"]')).toBeEnabled();
+  await chooseForwardMode(page, 'isolated');
+  await expect(page.locator('[data-preview-setup]')).toBeVisible();
+  await expect(page.locator('.forward-page button[type="submit"]')).toBeDisabled();
+  await page.evaluate(() => { window.scrollTo(0, 0); document.body.scrollTo(0, 0); });
+  await page.screenshot({ path: testInfo.outputPath('isolated-setup.png'), fullPage: true });
+  await chooseForwardMode(page, 'trusted');
+  await expect(page.locator('.forward-page input[name="trusted"]')).not.toBeChecked();
+  await expect(page.locator('.forward-page button[type="submit"]')).toBeDisabled();
+});
+
+test('已启用隔离预览无需信任勾选，提交隔离请求并在停止后解锁模式', async ({ page }) => {
+  const { calls } = await forwardingFixture(page, true);
+  await page.locator('.forward-page select[name="host"]').selectOption('alpha');
+  await page.locator('.forward-page input[name="port"]').fill('8080');
+  await chooseForwardMode(page, 'isolated');
+  await expect(page.locator('.forward-page input[name="trusted"]')).toBeHidden();
+  await expect(page.locator('.forward-page button[type="submit"]')).toBeEnabled();
+  await page.locator('.forward-page button[type="submit"]').click();
+  await expect.poll(() => calls.find((call) => call.type === 'forwarding')?.body).toEqual({ port: 8080, mode: 'isolated' });
+  await expect(page.locator('[data-preview-link]')).toHaveAttribute('href', 'https://isolated.example.net/start#xxx');
+  await expect(page.locator('.forward-page select[name="mode"]')).toBeDisabled();
+  await page.locator('[data-stop]').click();
+  await expect(page.locator('.forward-page select[name="mode"]')).toBeEnabled();
+});
+
+test('切换转发方式会清空之前的信任确认', async ({ page }) => {
+  await forwardingFixture(page, true);
+  await page.locator('.forward-page select[name="host"]').selectOption('alpha');
+  await page.locator('.forward-page input[name="trusted"]').check();
+  await expect(page.locator('.forward-page input[name="trusted"]')).toBeChecked();
+  await chooseForwardMode(page, 'isolated');
+  await chooseForwardMode(page, 'trusted');
+  await expect(page.locator('.forward-page input[name="trusted"]')).not.toBeChecked();
+  await expect(page.locator('.forward-page button[type="submit"]')).toBeDisabled();
+});
 
 test('连接转发发送 forward 协议并提供弹窗拦截回退链接，停止后解锁主机', async ({ page }, testInfo) => {
   const { calls } = await forwardingFixture(page);
   await page.evaluate(() => { window.open = () => null; });
   await startForward(page);
   await expect.poll(() => calls.find((call) => call.type === 'connect')?.mode).toBe('forward');
-  await expect.poll(() => calls.find((call) => call.type === 'forwarding')?.body).toEqual({ port: 8080 });
-  await expect.poll(() => page.locator('a[data-preview-link]').getAttribute('href')).toBe('https://preview.example.net/__edgessh/start#xxx');
+  await expect.poll(() => calls.find((call) => call.type === 'forwarding')?.body).toEqual({ port: 8080, mode: 'trusted', trusted: true });
+  await expect.poll(() => page.locator('a[data-preview-link]').getAttribute('href')).toBe(trustedURL);
   await expect(page.locator('a[data-preview-link]')).toBeVisible();
   await expect(page.locator('a[data-preview-link]')).toHaveAttribute('rel', 'noopener noreferrer');
   await expect(page.locator('a[data-preview-link]')).toHaveAttribute('target', '_blank');
   await page.locator('[data-stop]').click();
   await expect(page.locator('a[data-preview-link]')).toBeHidden();
   await expect(page.locator('.forward-page select[name="host"]')).toBeEnabled();
+  await page.evaluate(() => { window.scrollTo(0, 0); document.body.scrollTo(0, 0); });
   await page.screenshot({ path: testInfo.outputPath('forwarding-desktop.png'), fullPage: true });
 });
 
@@ -73,10 +132,13 @@ test('离开总览会关闭独立转发 WebSocket，返回页面保持未连接'
 });
 
 test('空主机禁用连接按钮且桌面与 375px 手机布局没有横向溢出', async ({ page }, testInfo) => {
-  await page.route('**/api/hosts', (route) => route.fulfill({ json: { hosts: [] } }));
-  await page.goto('/');
-  await page.locator('#rail-forward').click();
+  await forwardingFixture(page, false, true);
+  await expect(page.locator('.forward-page')).toBeVisible();
+  await expect(page.locator('.forward-page h1')).toHaveText('端口转发');
+  await expect(page.locator('.forward-page select[name="mode"]')).toHaveValue('trusted');
+  await expect(page.locator('[data-trust-warning]')).toBeVisible();
   await expect(page.locator('.forward-page button[type="submit"]')).toBeDisabled();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.evaluate(() => { window.scrollTo(0, 0); document.body.scrollTo(0, 0); });
   await page.screenshot({ path: testInfo.outputPath('forwarding-mobile.png'), fullPage: true });
 });

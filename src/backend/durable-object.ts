@@ -86,6 +86,7 @@ export class SSHSessionDO implements DurableObject {
     if (await this.state.storage.get('account-id') !== accountId) {
       return Response.json({ error: 'Session owner mismatch' }, { status: 403 });
     }
+    if (url.pathname === '/forward-http') return this.forwarding.trusted(request);
     if (url.pathname === '/forward') {
       if (request.method === 'DELETE') {
         this.forwarding.stop();
@@ -94,10 +95,11 @@ export class SSHSessionDO implements DurableObject {
       if (request.method !== 'POST') return previewError('Method not allowed', 405);
       const session = [...this.sessions.values()].find((item) => item.isForwardReady());
       if (!session) return previewError('请先建立端口转发 SSH 连接。', 409);
-      const { port } = await request.json<{ port: number }>();
+      const { port, mode } = await request.json<{ port: number; mode: 'trusted' | 'isolated' }>();
       const origin = request.headers.get('x-preview-origin');
-      if (!Number.isInteger(port) || port < 1 || port > 65535 || !origin) return previewError('Invalid forwarding configuration', 400);
-      try { return await this.forwarding.create(session, port, origin, this.state.id.toString()); }
+      if (!Number.isInteger(port) || port < 1 || port > 65535 || !origin
+        || (mode !== 'trusted' && mode !== 'isolated')) return previewError('Invalid forwarding configuration', 400);
+      try { return await this.forwarding.create(session, port, origin, this.state.id.toString(), mode); }
       catch { return previewError('远端端口不可达或 SSH 服务未允许 TCP 转发。', 502); }
     }
     if (url.pathname === '/sftp') return this.attachSFTP(request);
